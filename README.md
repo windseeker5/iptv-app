@@ -13,5 +13,17 @@ contract this app talks to.
 
 ## Status
 
-Early setup — no app code yet. Next step: create the initial Compose-for-TV
-project in Android Studio and validate D-pad navigation on real hardware.
+Minimal Compose-for-TV project scaffolded — a placeholder screen showing a
+focusable list of fake channels, to validate D-pad navigation before any
+real channel/EPG logic is wired in.
+
+Next step: open this folder in Android Studio, let it sync (it will offer
+to install any missing SDK platform/build-tools and create the Gradle
+wrapper), then run on a real Google TV device over `adb connect` and
+confirm D-pad up/down/select actually moves focus between the cards.
+
+## Requirements
+
+- Android Studio (installed)
+- A Google TV device on the same network, with Developer Options + ADB
+  debugging enabled, for `adb connect <tv-ip>:5555`
