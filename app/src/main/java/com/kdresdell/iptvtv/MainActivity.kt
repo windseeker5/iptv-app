@@ -2,6 +2,7 @@ package com.kdresdell.iptvtv
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,6 +19,7 @@ private sealed class Screen {
     data object Settings : Screen()
     data object Categories : Screen()
     data class Channels(val category: LiveCategory) : Screen()
+    data class Player(val category: LiveCategory, val channel: LiveChannel) : Screen()
 }
 
 class MainActivity : ComponentActivity() {
@@ -82,10 +84,20 @@ class MainActivity : ComponentActivity() {
                         ChannelListScreen(
                             categoryName = currentScreen.category.categoryName,
                             state = channelsState,
-                            onSelectChannel = { /* playback comes in the next iteration */ },
+                            onSelectChannel = { channel ->
+                                screen = Screen.Player(currentScreen.category, channel)
+                            },
                             onBack = { screen = Screen.Categories }
                         )
                     }
+                }
+
+                is Screen.Player -> {
+                    val api = remember(credentials) { XtreamApi(credentials) }
+                    BackHandler {
+                        screen = Screen.Channels(currentScreen.category)
+                    }
+                    PlayerScreen(streamUrl = api.liveStreamUrl(currentScreen.channel.streamId))
                 }
             }
         }

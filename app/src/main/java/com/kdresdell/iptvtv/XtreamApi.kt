@@ -78,6 +78,14 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
+    // {server}/live/{username}/{password}/{stream_id}.ts - path-based, no API call needed.
+    fun liveStreamUrl(streamId: Int): String {
+        val base = normalizedBaseUrl()
+        val user = encode(credentials.username)
+        val pass = encode(credentials.password)
+        return "$base/live/$user/$pass/$streamId.ts"
+    }
+
     private fun parseArray(body: String, errorMessage: String): JSONArray =
         try {
             JSONArray(body)
