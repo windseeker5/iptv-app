@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.kdresdell.iptvtv"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.kdresdell.iptvtv"
-        minSdk = 21
-        targetSdk = 34
+        minSdk = 23
+        targetSdk = 35
         versionCode = 1
         versionName = "0.1"
     }
