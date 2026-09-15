@@ -47,15 +47,37 @@ class MainActivity : ComponentActivity() {
             val prefs = remember { ProviderPrefs(context) }
             val favoritesStore = remember { FavoritesStore(context) }
             val channelDb = remember { LiveChannelDatabase(context) }
+            val defaultChannelStore = remember { DefaultChannelStore(context) }
             var credentials by remember { mutableStateOf(prefs.load()) }
             var favorites by remember { mutableStateOf(favoritesStore.load()) }
+            var defaultStreamId by remember { mutableStateOf(defaultChannelStore.getDefaultStreamId()) }
+            // Computed once, at cold start: if a default channel is set and
+            // still among the favorites, launch straight into it instead of
+            // the Favorites list.
             var screen by remember {
-                mutableStateOf<Screen>(if (credentials.isComplete) Screen.Favorites else Screen.Settings)
+                mutableStateOf<Screen>(
+                    when {
+                        !credentials.isComplete -> Screen.Settings
+                        else -> {
+                            val defaultChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
+                            if (defaultChannel != null) {
+                                Screen.Player(defaultChannel, returnTo = Screen.Favorites)
+                            } else {
+                                Screen.Favorites
+                            }
+                        }
+                    }
+                )
             }
 
             val isFavorite: (Int) -> Boolean = { id -> favorites.any { it.streamId == id } }
             val toggleFavorite: (LiveChannel) -> Unit = { channel ->
                 favorites = favoritesStore.toggle(channel, favorites)
+            }
+            val onSetDefault: (LiveChannel) -> Unit = { channel ->
+                val newDefault = if (defaultStreamId == channel.streamId) null else channel.streamId
+                defaultStreamId = newDefault
+                defaultChannelStore.setDefault(newDefault)
             }
             val onSelectRail: (RailItem) -> Unit = { item -> screen = item.toScreen() }
 
@@ -124,8 +146,10 @@ class MainActivity : ComponentActivity() {
                         FavoritesScreen(
                             favorites = favorites,
                             nowPlaying = nowPlaying,
+                            defaultStreamId = defaultStreamId,
                             onPlay = { channel -> screen = Screen.Player(channel, returnTo = Screen.Favorites) },
-                            onRemove = toggleFavorite
+                            onRemove = toggleFavorite,
+                            onSetDefault = onSetDefault
                         )
                     }
                 }

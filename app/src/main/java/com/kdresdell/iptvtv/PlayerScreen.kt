@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -19,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -29,6 +31,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -66,6 +69,7 @@ fun PlayerScreen(
     }
 
     var showInfo by remember(channel.streamId) { mutableStateOf(true) }
+    var isPlaying by remember(channel.streamId) { mutableStateOf(true) }
     var nowPlaying by remember(channel.streamId) { mutableStateOf<NowPlayingInfo?>(null) }
     val focusRequester = remember { FocusRequester() }
 
@@ -79,9 +83,10 @@ fun PlayerScreen(
 
     // Auto-hide the info overlay after a few seconds, same as any TV
     // channel-change banner - resets whenever it's shown again (OK press
-    // or a new channel).
-    LaunchedEffect(showInfo, channel.streamId) {
-        if (showInfo) {
+    // or a new channel). Doesn't auto-hide while paused, since the pause
+    // button lives in this same overlay.
+    LaunchedEffect(showInfo, channel.streamId, isPlaying) {
+        if (showInfo && isPlaying) {
             delay(5000)
             showInfo = false
         }
@@ -100,7 +105,16 @@ fun PlayerScreen(
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.key) {
                     Key.DirectionCenter, Key.Enter -> {
-                        showInfo = !showInfo
+                        // First OK reveals the overlay; while it's showing,
+                        // OK toggles play/pause directly - this is the only
+                        // way to reach it, so it must not require navigating
+                        // to a separately-focused button.
+                        if (!showInfo) {
+                            showInfo = true
+                        } else {
+                            isPlaying = !isPlaying
+                            exoPlayer.playWhenReady = isPlaying
+                        }
                         true
                     }
                     Key.DirectionUp -> {
@@ -148,6 +162,20 @@ fun PlayerScreen(
                         Text(text = description, color = Color.White)
                     }
                 }
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(24.dp)
+            ) {
+                Text(
+                    text = if (isPlaying) "⏸" else "▶",
+                    color = Color.White,
+                    fontSize = 48.sp
+                )
             }
         }
     }

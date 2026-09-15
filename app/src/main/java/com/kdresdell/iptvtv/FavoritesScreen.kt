@@ -33,8 +33,10 @@ import kotlinx.coroutines.delay
 fun FavoritesScreen(
     favorites: List<LiveChannel>,
     nowPlaying: Map<Int, NowPlayingInfo>,
+    defaultStreamId: Int?,
     onPlay: (LiveChannel) -> Unit,
-    onRemove: (LiveChannel) -> Unit
+    onRemove: (LiveChannel) -> Unit,
+    onSetDefault: (LiveChannel) -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
     val firstItemFocusRequester = remember { FocusRequester() }
@@ -77,7 +79,9 @@ fun FavoritesScreen(
                     onPlay = { onPlay(channel) },
                     onToggleFavorite = { onRemove(channel) },
                     subtitle = epgSubtitle(nowPlaying[channel.streamId]),
-                    playCardModifier = if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier
+                    playCardModifier = if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier,
+                    isDefault = channel.streamId == defaultStreamId,
+                    onSetDefault = { onSetDefault(channel) }
                 )
             }
         }

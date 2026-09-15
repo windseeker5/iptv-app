@@ -22,7 +22,9 @@ fun ChannelRow(
     onPlay: () -> Unit,
     onToggleFavorite: () -> Unit,
     subtitle: String? = null,
-    playCardModifier: Modifier = Modifier
+    playCardModifier: Modifier = Modifier,
+    isDefault: Boolean = false,
+    onSetDefault: (() -> Unit)? = null
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -41,6 +43,14 @@ fun ChannelRow(
                 text = if (isFavorite) "★ Remove" else "☆ Favorite",
                 modifier = Modifier.padding(24.dp)
             )
+        }
+        if (onSetDefault != null) {
+            Card(onClick = onSetDefault) {
+                Text(
+                    text = if (isDefault) "★ Default" else "Set as Default",
+                    modifier = Modifier.padding(24.dp)
+                )
+            }
         }
     }
 }
