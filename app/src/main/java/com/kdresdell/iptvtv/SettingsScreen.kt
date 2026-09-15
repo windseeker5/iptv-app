@@ -29,8 +29,7 @@ fun SettingsScreen(
     initial: ProviderCredentials,
     onSave: (ProviderCredentials) -> Unit
 ) {
-    // TODO demo convenience only - remove this default before sharing the app.
-    var serverUrl by remember { mutableStateOf(initial.serverUrl.ifBlank { "http://cf.smartersiptv.vip" }) }
+    var serverUrl by remember { mutableStateOf(initial.serverUrl) }
     var username by remember { mutableStateOf(initial.username) }
     var password by remember { mutableStateOf(initial.password) }
 
