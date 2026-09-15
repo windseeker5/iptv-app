@@ -11,11 +11,13 @@ import android.database.sqlite.SQLiteOpenHelper
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 4) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 6) {
 
     override fun onCreate(db: SQLiteDatabase) {
         createLiveChannelsTable(db)
         createEpgTable(db)
+        createVodStreamsTable(db)
+        createSeriesTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -30,6 +32,12 @@ class LiveChannelDatabase(context: Context) :
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE live_channels ADD COLUMN stream_icon TEXT NOT NULL DEFAULT ''")
         }
+        if (oldVersion < 5) {
+            createVodStreamsTable(db)
+        }
+        if (oldVersion < 6) {
+            createSeriesTable(db)
+        }
     }
 
     private fun createLiveChannelsTable(db: SQLiteDatabase) {
@@ -40,6 +48,33 @@ class LiveChannelDatabase(context: Context) :
                 name TEXT NOT NULL,
                 category_id TEXT NOT NULL,
                 stream_icon TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
+    }
+
+    private fun createVodStreamsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS vod_streams (
+                stream_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                category_id TEXT NOT NULL,
+                stream_icon TEXT NOT NULL DEFAULT '',
+                container_extension TEXT NOT NULL DEFAULT 'mp4'
+            )
+            """.trimIndent()
+        )
+    }
+
+    private fun createSeriesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS series (
+                series_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                category_id TEXT NOT NULL,
+                cover TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -110,6 +145,20 @@ class LiveChannelDatabase(context: Context) :
         }
     }
 
+    fun isVodEmpty(): Boolean {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM vod_streams", null).use { cursor ->
+            cursor.moveToFirst()
+            return cursor.getInt(0) == 0
+        }
+    }
+
+    fun isSeriesEmpty(): Boolean {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM series", null).use { cursor ->
+            cursor.moveToFirst()
+            return cursor.getInt(0) == 0
+        }
+    }
+
     // channels is consumed lazily and inserted in one transaction, so the
     // full catalog never needs to exist as a Kotlin List at any point.
     // onProgress is called periodically (not on every row) with the running
@@ -142,19 +191,119 @@ class LiveChannelDatabase(context: Context) :
         }
     }
 
-    fun search(query: String, limit: Int = 200): List<LiveChannel> {
-        val results = mutableListOf<LiveChannel>()
+    // Same "streamed insert into SQLite" reasoning as replaceAll, for the
+    // VOD catalog.
+    fun replaceAllVod(streams: Sequence<VodStream>, onProgress: (Int) -> Unit = {}) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM vod_streams")
+            val statement = db.compileStatement(
+                "INSERT OR REPLACE INTO vod_streams (stream_id, name, category_id, stream_icon, container_extension) VALUES (?, ?, ?, ?, ?)"
+            )
+            var count = 0
+            for (stream in streams) {
+                statement.clearBindings()
+                statement.bindLong(1, stream.streamId.toLong())
+                statement.bindString(2, stream.name)
+                statement.bindString(3, stream.categoryId)
+                statement.bindString(4, stream.streamIcon)
+                statement.bindString(5, stream.containerExtension)
+                statement.executeInsert()
+                count++
+                if (count % 250 == 0) {
+                    onProgress(count)
+                }
+            }
+            onProgress(count)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // Same "streamed insert into SQLite" reasoning as replaceAll, for the
+    // series catalog.
+    fun replaceAllSeries(series: Sequence<SeriesShow>, onProgress: (Int) -> Unit = {}) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM series")
+            val statement = db.compileStatement(
+                "INSERT OR REPLACE INTO series (series_id, name, category_id, cover) VALUES (?, ?, ?, ?)"
+            )
+            var count = 0
+            for (show in series) {
+                statement.clearBindings()
+                statement.bindLong(1, show.seriesId.toLong())
+                statement.bindString(2, show.name)
+                statement.bindString(3, show.categoryId)
+                statement.bindString(4, show.cover)
+                statement.executeInsert()
+                count++
+                if (count % 250 == 0) {
+                    onProgress(count)
+                }
+            }
+            onProgress(count)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // Searches all three indexes and returns a combined, type-tagged
+    // result list - live channels, then VOD movies, then series.
+    fun searchAll(query: String, limit: Int = 100): List<SearchResult> {
+        val results = mutableListOf<SearchResult>()
         readableDatabase.rawQuery(
             "SELECT stream_id, name, category_id, stream_icon FROM live_channels WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
             arrayOf("%$query%", limit.toString())
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results.add(
-                    LiveChannel(
-                        streamId = cursor.getInt(0),
-                        name = cursor.getString(1),
-                        categoryId = cursor.getString(2),
-                        streamIcon = cursor.getString(3)
+                    SearchResult.Live(
+                        LiveChannel(
+                            streamId = cursor.getInt(0),
+                            name = cursor.getString(1),
+                            categoryId = cursor.getString(2),
+                            streamIcon = cursor.getString(3)
+                        )
+                    )
+                )
+            }
+        }
+        readableDatabase.rawQuery(
+            "SELECT stream_id, name, category_id, stream_icon, container_extension FROM vod_streams WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
+            arrayOf("%$query%", limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    SearchResult.Vod(
+                        VodStream(
+                            streamId = cursor.getInt(0),
+                            name = cursor.getString(1),
+                            categoryId = cursor.getString(2),
+                            streamIcon = cursor.getString(3),
+                            containerExtension = cursor.getString(4)
+                        )
+                    )
+                )
+            }
+        }
+        readableDatabase.rawQuery(
+            "SELECT series_id, name, category_id, cover FROM series WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
+            arrayOf("%$query%", limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    SearchResult.Series(
+                        SeriesShow(
+                            seriesId = cursor.getInt(0),
+                            name = cursor.getString(1),
+                            categoryId = cursor.getString(2),
+                            cover = cursor.getString(3)
+                        )
                     )
                 )
             }

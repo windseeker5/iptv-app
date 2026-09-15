@@ -19,14 +19,16 @@ import androidx.tv.material3.darkColorScheme as tvDarkColorScheme
 
 enum class RailItem(val icon: String, val label: String) {
     Search("🔍", "Search"),
+    MyChannel("📺", "My Channel"),
+    MyVod("🎬", "My VOD"),
     Categories("☰", "Categories"),
     Settings("⚙", "Settings")
 }
 
 // Persistent left-side navigation, always visible next to whatever screen
-// is currently shown (except the full-screen player). Favorites is the
-// app's home/default content and deliberately has no rail entry of its
-// own - the rail is the way out to other things, not a way back to it.
+// is currently shown (except the full-screen player). "My Channel" is the
+// app's home/default content (still launched into by default / on cold
+// start) but also has its own rail entry now, same as everything else.
 @Composable
 fun SideRail(
     selected: RailItem?,

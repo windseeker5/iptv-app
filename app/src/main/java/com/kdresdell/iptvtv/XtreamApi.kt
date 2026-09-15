@@ -19,6 +19,34 @@ data class LiveChannel(
     val streamIcon: String = ""
 )
 
+data class VodCategory(val categoryId: String, val categoryName: String)
+data class VodStream(
+    val streamId: Int,
+    val name: String,
+    val categoryId: String,
+    val streamIcon: String = "",
+    val containerExtension: String = "mp4"
+)
+
+// Xtream treats series (TV shows) as a third content type, separate from
+// VOD movies - a series has no direct stream_id of its own, only episodes
+// (fetched via getSeriesEpisodes), each with its own playable id.
+data class SeriesShow(
+    val seriesId: Int,
+    val name: String,
+    val categoryId: String,
+    val cover: String = ""
+)
+
+data class SeriesEpisode(
+    val episodeId: Int,
+    val episodeNum: Int,
+    val season: Int,
+    val title: String,
+    val containerExtension: String = "mp4",
+    val description: String = ""
+)
+
 data class NowPlayingInfo(
     val title: String,
     val description: String,
@@ -153,6 +181,180 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
+    suspend fun getVodCategories(): List<VodCategory> {
+        val body = getJson(playerApiUrl("get_vod_categories"))
+        val array = parseArray(body, "Unexpected response listing VOD categories")
+        return (0 until array.length()).map { i ->
+            val obj = array.getJSONObject(i)
+            VodCategory(
+                categoryId = obj.optString("category_id"),
+                categoryName = obj.optString("category_name")
+            )
+        }
+    }
+
+    // Mirrors syncAllLiveChannelsInto - a real provider's VOD catalog can be
+    // just as large as its live one, so this streams into SQLite the same way.
+    suspend fun syncAllVodStreamsInto(
+        db: LiveChannelDatabase,
+        onProgress: (Int) -> Unit = {}
+    ) = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(playerApiUrl("get_vod_streams")).build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw XtreamApiException("Server returned HTTP ${response.code}")
+                }
+                val body = response.body ?: throw XtreamApiException("Empty response from server")
+                body.charStream().use { reader ->
+                    JsonReader(reader).use { json ->
+                        val streams = sequence {
+                            json.beginArray()
+                            while (json.hasNext()) {
+                                var streamId = 0
+                                var name = ""
+                                var categoryId = ""
+                                var streamIcon = ""
+                                var containerExtension = "mp4"
+                                json.beginObject()
+                                while (json.hasNext()) {
+                                    val fieldName = json.nextName()
+                                    if (json.peek() == JsonToken.NULL) {
+                                        json.skipValue()
+                                        continue
+                                    }
+                                    when (fieldName) {
+                                        "stream_id" -> streamId = json.nextString().toIntOrNull() ?: 0
+                                        "name" -> name = json.nextString()
+                                        "category_id" -> categoryId = json.nextString()
+                                        "stream_icon" -> streamIcon = json.nextString()
+                                        "container_extension" -> containerExtension = json.nextString()
+                                        else -> json.skipValue()
+                                    }
+                                }
+                                json.endObject()
+                                yield(VodStream(streamId, name, categoryId, streamIcon, containerExtension))
+                            }
+                            json.endArray()
+                        }
+                        db.replaceAllVod(streams, onProgress)
+                    }
+                }
+            }
+        } catch (e: XtreamApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw XtreamApiException("Could not reach server: ${e.message}")
+        }
+    }
+
+    // Mirrors syncAllVodStreamsInto for the series catalog. Only the show
+    // list is synced/searchable here - episodes are fetched per-series
+    // on demand via getSeriesEpisodes, not indexed up front.
+    suspend fun syncAllSeriesInto(
+        db: LiveChannelDatabase,
+        onProgress: (Int) -> Unit = {}
+    ) = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(playerApiUrl("get_series")).build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw XtreamApiException("Server returned HTTP ${response.code}")
+                }
+                val body = response.body ?: throw XtreamApiException("Empty response from server")
+                body.charStream().use { reader ->
+                    JsonReader(reader).use { json ->
+                        val seriesSeq = sequence {
+                            json.beginArray()
+                            while (json.hasNext()) {
+                                var seriesId = 0
+                                var name = ""
+                                var categoryId = ""
+                                var cover = ""
+                                json.beginObject()
+                                while (json.hasNext()) {
+                                    val fieldName = json.nextName()
+                                    if (json.peek() == JsonToken.NULL) {
+                                        json.skipValue()
+                                        continue
+                                    }
+                                    when (fieldName) {
+                                        "series_id" -> seriesId = json.nextString().toIntOrNull() ?: 0
+                                        "name" -> name = json.nextString()
+                                        "category_id" -> categoryId = json.nextString()
+                                        "cover" -> cover = json.nextString()
+                                        else -> json.skipValue()
+                                    }
+                                }
+                                json.endObject()
+                                yield(SeriesShow(seriesId, name, categoryId, cover))
+                            }
+                            json.endArray()
+                        }
+                        db.replaceAllSeries(seriesSeq, onProgress)
+                    }
+                }
+            }
+        } catch (e: XtreamApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw XtreamApiException("Could not reach server: ${e.message}")
+        }
+    }
+
+    // A single series' episodes, grouped by season in the response
+    // ("episodes": {"1": [...], "2": [...]}) - small enough per-series to
+    // parse as one JSONObject, unlike the full catalogs above.
+    suspend fun getSeriesEpisodes(seriesId: Int): List<SeriesEpisode> {
+        val body = getJson(playerApiUrl("get_series_info", "&series_id=$seriesId"))
+        val root = try {
+            JSONObject(body)
+        } catch (e: Exception) {
+            throw XtreamApiException("Unexpected response loading episodes")
+        }
+        val episodesBySeason = root.optJSONObject("episodes") ?: return emptyList()
+        val episodes = mutableListOf<SeriesEpisode>()
+        val seasonKeys = episodesBySeason.keys()
+        while (seasonKeys.hasNext()) {
+            val seasonKey = seasonKeys.next()
+            val seasonNumber = seasonKey.toIntOrNull() ?: 0
+            val array = episodesBySeason.optJSONArray(seasonKey) ?: continue
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                // Per-episode synopsis lives in a nested "info" object on
+                // most providers, occasionally at the top level - check both.
+                val info = obj.optJSONObject("info")
+                val description = info?.optString("plot")?.takeIf { it.isNotBlank() }
+                    ?: obj.optString("plot").takeIf { it.isNotBlank() }
+                    ?: ""
+                episodes.add(
+                    SeriesEpisode(
+                        episodeId = obj.optString("id").toIntOrNull() ?: 0,
+                        episodeNum = obj.optInt("episode_num"),
+                        season = seasonNumber,
+                        title = obj.optString("title"),
+                        containerExtension = obj.optString("container_extension").ifBlank { "mp4" },
+                        description = description
+                    )
+                )
+            }
+        }
+        return episodes.sortedWith(compareBy({ it.season }, { it.episodeNum }))
+    }
+
+    // Movie synopsis - not included in get_vod_streams, needs its own call.
+    // Only invoked when a movie is actually opened in the player, never for
+    // the whole catalog.
+    suspend fun getVodDescription(streamId: Int): String {
+        return try {
+            val body = getJson(playerApiUrl("get_vod_info", "&vod_id=$streamId"))
+            val info = JSONObject(body).optJSONObject("info")
+            info?.optString("plot")?.takeIf { it.isNotBlank() } ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
     // Deliberately only called for a small shortlist (favorites), never
     // the whole catalog - unlike get_live_streams, there's no cheap way
     // to batch this across many channels, so it must stay opt-in per
@@ -190,6 +392,24 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         val user = encode(credentials.username)
         val pass = encode(credentials.password)
         return "$base/live/$user/$pass/$streamId.ts"
+    }
+
+    // {server}/movie/{username}/{password}/{stream_id}.{container_extension} - path-based, no API call needed.
+    fun vodStreamUrl(streamId: Int, containerExtension: String): String {
+        val base = normalizedBaseUrl()
+        val user = encode(credentials.username)
+        val pass = encode(credentials.password)
+        val ext = containerExtension.ifBlank { "mp4" }
+        return "$base/movie/$user/$pass/$streamId.$ext"
+    }
+
+    // {server}/series/{username}/{password}/{episode_id}.{container_extension} - path-based, no API call needed.
+    fun seriesEpisodeUrl(episodeId: Int, containerExtension: String): String {
+        val base = normalizedBaseUrl()
+        val user = encode(credentials.username)
+        val pass = encode(credentials.password)
+        val ext = containerExtension.ifBlank { "mp4" }
+        return "$base/series/$user/$pass/$episodeId.$ext"
     }
 
     private fun parseArray(body: String, errorMessage: String): JSONArray =
