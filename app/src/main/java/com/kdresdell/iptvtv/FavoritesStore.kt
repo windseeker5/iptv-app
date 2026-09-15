@@ -1,0 +1,56 @@
+package com.kdresdell.iptvtv
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+
+// Local-only list of favorited live channels, keyed by stream_id.
+class FavoritesStore(context: Context) {
+    private val prefs = context.getSharedPreferences("favorites", Context.MODE_PRIVATE)
+
+    fun load(): List<LiveChannel> {
+        val raw = prefs.getString(KEY, null) ?: return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                LiveChannel(
+                    streamId = obj.getInt("stream_id"),
+                    name = obj.getString("name"),
+                    categoryId = obj.optString("category_id")
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun save(channels: List<LiveChannel>) {
+        val array = JSONArray()
+        channels.forEach { channel ->
+            array.put(
+                JSONObject().apply {
+                    put("stream_id", channel.streamId)
+                    put("name", channel.name)
+                    put("category_id", channel.categoryId)
+                }
+            )
+        }
+        prefs.edit().putString(KEY, array.toString()).apply()
+    }
+
+    // Returns the updated list so the caller can update its own UI state.
+    fun toggle(channel: LiveChannel, current: List<LiveChannel>): List<LiveChannel> {
+        val updated = if (current.any { it.streamId == channel.streamId }) {
+            current.filterNot { it.streamId == channel.streamId }
+        } else {
+            current + channel
+        }
+        save(updated)
+        return updated
+    }
+
+    companion object {
+        private const val KEY = "favorite_channels"
+    }
+}

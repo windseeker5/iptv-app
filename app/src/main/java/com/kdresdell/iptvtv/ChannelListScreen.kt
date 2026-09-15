@@ -19,7 +19,9 @@ import androidx.tv.material3.Text
 fun ChannelListScreen(
     categoryName: String,
     state: LoadState<List<LiveChannel>>,
+    isFavorite: (Int) -> Boolean,
     onSelectChannel: (LiveChannel) -> Unit,
+    onToggleFavorite: (LiveChannel) -> Unit,
     onBack: () -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
@@ -51,9 +53,12 @@ fun ChannelListScreen(
                 ) {
                     item { Text(text = categoryName, color = onBackground) }
                     items(state.data) { channel ->
-                        Card(onClick = { onSelectChannel(channel) }) {
-                            Text(text = channel.name, modifier = Modifier.padding(24.dp))
-                        }
+                        ChannelRow(
+                            channel = channel,
+                            isFavorite = isFavorite(channel.streamId),
+                            onPlay = { onSelectChannel(channel) },
+                            onToggleFavorite = { onToggleFavorite(channel) }
+                        )
                     }
                     item {
                         Card(onClick = onBack) {

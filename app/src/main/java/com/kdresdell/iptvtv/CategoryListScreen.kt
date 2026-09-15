@@ -18,7 +18,10 @@ import androidx.tv.material3.Text
 @Composable
 fun CategoryListScreen(
     state: LoadState<List<LiveCategory>>,
+    favoritesCount: Int,
     onSelectCategory: (LiveCategory) -> Unit,
+    onSearch: () -> Unit,
+    onFavorites: () -> Unit,
     onEditSettings: () -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
@@ -41,6 +44,16 @@ fun CategoryListScreen(
                     ) {
                         item {
                             Text(text = "Live categories", color = onBackground)
+                        }
+                        item {
+                            Card(onClick = onSearch) {
+                                Text(text = "🔍 Search channels", modifier = Modifier.padding(24.dp))
+                            }
+                        }
+                        item {
+                            Card(onClick = onFavorites) {
+                                Text(text = "★ Favorites ($favoritesCount)", modifier = Modifier.padding(24.dp))
+                            }
                         }
                         items(state.data) { category ->
                             Card(onClick = { onSelectCategory(category) }) {

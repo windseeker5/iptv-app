@@ -1,5 +1,7 @@
 package com.kdresdell.iptvtv
 
+import android.util.JsonReader
+import android.util.JsonToken
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -65,8 +67,10 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
-    suspend fun getLiveStreams(categoryId: String): List<LiveChannel> {
-        val body = getJson(playerApiUrl("get_live_streams", "&category_id=${encode(categoryId)}"))
+    // Pass null to fetch every live channel across all categories (used by search).
+    suspend fun getLiveStreams(categoryId: String? = null): List<LiveChannel> {
+        val extra = categoryId?.let { "&category_id=${encode(it)}" } ?: ""
+        val body = getJson(playerApiUrl("get_live_streams", extra))
         val array = parseArray(body, "Unexpected response listing channels")
         return (0 until array.length()).map { i ->
             val obj = array.getJSONObject(i)
@@ -75,6 +79,60 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                 name = obj.optString("name"),
                 categoryId = obj.optString("category_id")
             )
+        }
+    }
+
+    // Used to build the local search index. Streams the response body
+    // token-by-token straight into SQLite instead of materializing the
+    // whole (potentially huge, provider-dependent) catalog as one big
+    // JSONArray/List<LiveChannel> in memory - that approach caused real
+    // ANRs against a provider with a very large channel count.
+    suspend fun syncAllLiveChannelsInto(
+        db: LiveChannelDatabase,
+        onProgress: (Int) -> Unit = {}
+    ) = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(playerApiUrl("get_live_streams")).build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw XtreamApiException("Server returned HTTP ${response.code}")
+                }
+                val body = response.body ?: throw XtreamApiException("Empty response from server")
+                body.charStream().use { reader ->
+                    JsonReader(reader).use { json ->
+                        val channels = sequence {
+                            json.beginArray()
+                            while (json.hasNext()) {
+                                var streamId = 0
+                                var name = ""
+                                var categoryId = ""
+                                json.beginObject()
+                                while (json.hasNext()) {
+                                    val fieldName = json.nextName()
+                                    if (json.peek() == JsonToken.NULL) {
+                                        json.skipValue()
+                                        continue
+                                    }
+                                    when (fieldName) {
+                                        "stream_id" -> streamId = json.nextString().toIntOrNull() ?: 0
+                                        "name" -> name = json.nextString()
+                                        "category_id" -> categoryId = json.nextString()
+                                        else -> json.skipValue()
+                                    }
+                                }
+                                json.endObject()
+                                yield(LiveChannel(streamId, name, categoryId))
+                            }
+                            json.endArray()
+                        }
+                        db.replaceAll(channels, onProgress)
+                    }
+                }
+            }
+        } catch (e: XtreamApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw XtreamApiException("Could not reach server: ${e.message}")
         }
     }
 
