@@ -1,5 +1,6 @@
 package com.kdresdell.iptvtv
 
+import android.util.Base64
 import android.util.JsonReader
 import android.util.JsonToken
 import java.net.URLEncoder
@@ -8,9 +9,22 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
 
 data class LiveCategory(val categoryId: String, val categoryName: String)
-data class LiveChannel(val streamId: Int, val name: String, val categoryId: String)
+data class LiveChannel(
+    val streamId: Int,
+    val name: String,
+    val categoryId: String,
+    val streamIcon: String = ""
+)
+
+data class NowPlayingInfo(
+    val title: String,
+    val description: String,
+    val startEpochSeconds: Long?,
+    val stopEpochSeconds: Long?
+)
 
 class XtreamApiException(message: String) : Exception(message)
 
@@ -77,7 +91,8 @@ class XtreamApi(private val credentials: ProviderCredentials) {
             LiveChannel(
                 streamId = obj.optInt("stream_id"),
                 name = obj.optString("name"),
-                categoryId = obj.optString("category_id")
+                categoryId = obj.optString("category_id"),
+                streamIcon = obj.optString("stream_icon")
             )
         }
     }
@@ -106,6 +121,7 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                 var streamId = 0
                                 var name = ""
                                 var categoryId = ""
+                                var streamIcon = ""
                                 json.beginObject()
                                 while (json.hasNext()) {
                                     val fieldName = json.nextName()
@@ -117,11 +133,12 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                         "stream_id" -> streamId = json.nextString().toIntOrNull() ?: 0
                                         "name" -> name = json.nextString()
                                         "category_id" -> categoryId = json.nextString()
+                                        "stream_icon" -> streamIcon = json.nextString()
                                         else -> json.skipValue()
                                     }
                                 }
                                 json.endObject()
-                                yield(LiveChannel(streamId, name, categoryId))
+                                yield(LiveChannel(streamId, name, categoryId, streamIcon))
                             }
                             json.endArray()
                         }
@@ -133,6 +150,37 @@ class XtreamApi(private val credentials: ProviderCredentials) {
             throw e
         } catch (e: Exception) {
             throw XtreamApiException("Could not reach server: ${e.message}")
+        }
+    }
+
+    // Deliberately only called for a small shortlist (favorites), never
+    // the whole catalog - unlike get_live_streams, there's no cheap way
+    // to batch this across many channels, so it must stay opt-in per
+    // channel. Some providers base64-encode the title field.
+    suspend fun getNowPlayingInfo(streamId: Int): NowPlayingInfo? {
+        val body = getJson(playerApiUrl("get_short_epg", "&stream_id=$streamId&limit=1"))
+        return try {
+            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return null
+            if (listings.length() == 0) return null
+            val entry = listings.getJSONObject(0)
+            val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return null
+            NowPlayingInfo(
+                title = title,
+                description = decodeIfBase64(entry.optString("description")),
+                startEpochSeconds = entry.optString("start_timestamp").toLongOrNull(),
+                stopEpochSeconds = entry.optString("stop_timestamp").toLongOrNull()
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun decodeIfBase64(value: String): String {
+        return try {
+            val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
+            if (decoded.isNotBlank() && decoded.none { it.code < 32 && it != '\n' }) decoded else value
+        } catch (e: Exception) {
+            value
         }
     }
 

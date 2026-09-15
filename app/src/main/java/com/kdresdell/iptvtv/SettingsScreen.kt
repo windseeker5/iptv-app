@@ -18,7 +18,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.darkColorScheme
 
+// Self-contained theming: this screen is shown both standalone (first
+// run, no credentials yet) and nested inside the side rail's TV-themed
+// layout (editing existing settings) - wrapping its own theme here means
+// it renders correctly with readable contrast either way.
 @Composable
 fun SettingsScreen(
     initial: ProviderCredentials,
@@ -29,6 +34,7 @@ fun SettingsScreen(
     var username by remember { mutableStateOf(initial.username) }
     var password by remember { mutableStateOf(initial.password) }
 
+    MaterialTheme(colorScheme = darkColorScheme()) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -70,5 +76,6 @@ fun SettingsScreen(
                 Text("Save")
             }
         }
+    }
     }
 }

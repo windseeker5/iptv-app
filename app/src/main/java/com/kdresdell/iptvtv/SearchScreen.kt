@@ -23,7 +23,6 @@ import androidx.compose.material3.MaterialTheme as PhoneMaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text as PhoneText
 import androidx.compose.material3.darkColorScheme as phoneDarkColorScheme
-import androidx.tv.material3.Card
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
@@ -41,8 +40,7 @@ fun SearchScreen(
     onSearch: suspend (String) -> List<LiveChannel>,
     isFavorite: (Int) -> Boolean,
     onPlay: (LiveChannel) -> Unit,
-    onToggleFavorite: (LiveChannel) -> Unit,
-    onBack: () -> Unit
+    onToggleFavorite: (LiveChannel) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<LiveChannel>>(emptyList()) }
@@ -116,10 +114,6 @@ fun SearchScreen(
                     }
                 }
             }
-        }
-
-        Card(onClick = onBack) {
-            Text(text = "Back", modifier = Modifier.padding(24.dp))
         }
     }
 }

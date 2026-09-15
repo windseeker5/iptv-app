@@ -18,11 +18,7 @@ import androidx.tv.material3.Text
 @Composable
 fun CategoryListScreen(
     state: LoadState<List<LiveCategory>>,
-    favoritesCount: Int,
-    onSelectCategory: (LiveCategory) -> Unit,
-    onSearch: () -> Unit,
-    onFavorites: () -> Unit,
-    onEditSettings: () -> Unit
+    onSelectCategory: (LiveCategory) -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
     Box(
@@ -33,7 +29,7 @@ fun CategoryListScreen(
     ) {
         when (state) {
             is LoadState.Loading -> Text(text = "Loading categories...", color = onBackground)
-            is LoadState.Error -> ErrorWithRetry(message = state.message, onEditSettings = onEditSettings)
+            is LoadState.Error -> Text(text = "Could not load channels: ${state.message}", color = onBackground)
             is LoadState.Success -> {
                 if (state.data.isEmpty()) {
                     Text(text = "This provider returned no live categories.", color = onBackground)
@@ -45,43 +41,13 @@ fun CategoryListScreen(
                         item {
                             Text(text = "Live categories", color = onBackground)
                         }
-                        item {
-                            Card(onClick = onSearch) {
-                                Text(text = "🔍 Search channels", modifier = Modifier.padding(24.dp))
-                            }
-                        }
-                        item {
-                            Card(onClick = onFavorites) {
-                                Text(text = "★ Favorites ($favoritesCount)", modifier = Modifier.padding(24.dp))
-                            }
-                        }
                         items(state.data) { category ->
                             Card(onClick = { onSelectCategory(category) }) {
                                 Text(text = category.categoryName, modifier = Modifier.padding(24.dp))
                             }
                         }
-                        item {
-                            Card(onClick = onEditSettings) {
-                                Text(text = "Edit provider settings", modifier = Modifier.padding(24.dp))
-                            }
-                        }
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun ErrorWithRetry(message: String, onEditSettings: () -> Unit) {
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.padding(24.dp)
-    ) {
-        item { Text(text = "Could not load channels: $message", color = MaterialTheme.colorScheme.onBackground) }
-        item {
-            Card(onClick = onEditSettings) {
-                Text(text = "Check provider settings", modifier = Modifier.padding(24.dp))
             }
         }
     }

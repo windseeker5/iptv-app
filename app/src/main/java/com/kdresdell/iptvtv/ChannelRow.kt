@@ -1,6 +1,7 @@
 package com.kdresdell.iptvtv
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -8,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
+import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 
 // Two separate focusable targets per row (not one Card with two actions) -
@@ -18,14 +20,21 @@ fun ChannelRow(
     channel: LiveChannel,
     isFavorite: Boolean,
     onPlay: () -> Unit,
-    onToggleFavorite: () -> Unit
+    onToggleFavorite: () -> Unit,
+    subtitle: String? = null,
+    playCardModifier: Modifier = Modifier
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Card(onClick = onPlay, modifier = Modifier.weight(1f)) {
-            Text(text = channel.name, modifier = Modifier.padding(24.dp))
+        Card(onClick = onPlay, modifier = Modifier.weight(1f).then(playCardModifier)) {
+            Column(modifier = Modifier.padding(24.dp)) {
+                Text(text = channel.name)
+                if (subtitle != null) {
+                    Text(text = subtitle, style = MaterialTheme.typography.bodySmall)
+                }
+            }
         }
         Card(onClick = onToggleFavorite) {
             Text(

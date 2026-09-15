@@ -17,7 +17,8 @@ class FavoritesStore(context: Context) {
                 LiveChannel(
                     streamId = obj.getInt("stream_id"),
                     name = obj.getString("name"),
-                    categoryId = obj.optString("category_id")
+                    categoryId = obj.optString("category_id"),
+                    streamIcon = obj.optString("stream_icon")
                 )
             }
         } catch (e: Exception) {
@@ -33,6 +34,7 @@ class FavoritesStore(context: Context) {
                     put("stream_id", channel.streamId)
                     put("name", channel.name)
                     put("category_id", channel.categoryId)
+                    put("stream_icon", channel.streamIcon)
                 }
             )
         }
