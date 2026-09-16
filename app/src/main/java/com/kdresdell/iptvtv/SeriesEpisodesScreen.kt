@@ -7,11 +7,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
 import androidx.tv.material3.MaterialTheme
@@ -27,6 +30,15 @@ fun SeriesEpisodesScreen(
     onSelectEpisode: (SeriesEpisode) -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
+    val firstItemFocus = remember { FocusRequester() }
+
+    // See CategoryListScreen for why this is needed - without it, D-pad
+    // focus lands nowhere when this screen opens.
+    LaunchedEffect(state) {
+        if (state is LoadState.Success && state.data.isNotEmpty()) {
+            firstItemFocus.requestFocus()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -62,11 +74,16 @@ fun SeriesEpisodesScreen(
                     if (episodes.isEmpty()) {
                         item { Text(text = "No episodes found", color = onBackground) }
                     }
-                    items(rows) { (episode, isNewSeason) ->
+                    itemsIndexed(rows) { index, (episode, isNewSeason) ->
                         if (isNewSeason) {
                             Text(text = "Season ${episode.season}", color = onBackground)
                         }
-                        Card(onClick = { onSelectEpisode(episode) }, modifier = Modifier.fillMaxWidth()) {
+                        Card(
+                            onClick = { onSelectEpisode(episode) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                        ) {
                             Text(
                                 text = "E${episode.episodeNum} - ${episode.title.ifBlank { "Episode ${episode.episodeNum}" }}",
                                 modifier = Modifier.padding(24.dp)

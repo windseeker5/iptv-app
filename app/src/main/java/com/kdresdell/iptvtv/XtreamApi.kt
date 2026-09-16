@@ -54,6 +54,26 @@ data class NowPlayingInfo(
     val stopEpochSeconds: Long?
 )
 
+// A single program in a channel's EPG timeline (My TV guide, STYLE_GUIDE.md
+// §6.3) - unlike NowPlayingInfo, both timestamps are required since a
+// program with no known start/stop can't be placed or sized on the grid.
+data class EpgProgram(
+    val title: String,
+    val description: String,
+    val startEpochSeconds: Long,
+    val stopEpochSeconds: Long
+)
+
+// Account/subscription info from the bare player_api.php call (no
+// "action" param) - Xtream returns this alongside server_info, which this
+// app doesn't need. Either field can be absent/blank depending on the
+// provider (e.g. a lifetime account has no exp_date) - both are nullable
+// rather than defaulted, so callers can tell "unknown" apart from "0".
+data class AccountInfo(
+    val createdAtEpochSeconds: Long?,
+    val expDateEpochSeconds: Long?
+)
+
 class XtreamApiException(message: String) : Exception(message)
 
 // Talks to the Xtream Codes player_api.php contract documented in
@@ -94,6 +114,27 @@ class XtreamApi(private val credentials: ProviderCredentials) {
             throw e
         } catch (e: Exception) {
             throw XtreamApiException("Could not reach server: ${e.message}")
+        }
+    }
+
+    // §6.4 subscription progress bar - the bare player_api.php call (no
+    // "action" param) returns { "user_info": {...}, "server_info": {...} };
+    // only user_info's created_at/exp_date are used here. Returns nulls on
+    // any failure - this is a display-only extra, never worth failing
+    // sync/search over.
+    suspend fun getAccountInfo(): AccountInfo {
+        val base = normalizedBaseUrl()
+        val user = encode(credentials.username)
+        val pass = encode(credentials.password)
+        return try {
+            val body = getJson("$base/player_api.php?username=$user&password=$pass")
+            val userInfo = JSONObject(body).optJSONObject("user_info")
+            AccountInfo(
+                createdAtEpochSeconds = userInfo?.optString("created_at")?.toLongOrNull(),
+                expDateEpochSeconds = userInfo?.optString("exp_date")?.toLongOrNull()
+            )
+        } catch (e: Exception) {
+            AccountInfo(null, null)
         }
     }
 
@@ -375,6 +416,70 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    // Fetches a window of programs (current + upcoming - get_short_epg never
+    // returns anything already finished) for one channel's EPG timeline row.
+    // Entries missing a title or either timestamp are dropped: a program
+    // that can't be timed can't be placed on the grid.
+    suspend fun getEpgWindow(streamId: Int, limit: Int = 12): List<EpgProgram> {
+        val body = getJson(playerApiUrl("get_short_epg", "&stream_id=$streamId&limit=$limit"))
+        return try {
+            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return emptyList()
+            (0 until listings.length()).mapNotNull { i ->
+                val entry = listings.getJSONObject(i)
+                val start = entry.optString("start_timestamp").toLongOrNull() ?: return@mapNotNull null
+                val stop = entry.optString("stop_timestamp").toLongOrNull() ?: return@mapNotNull null
+                val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                EpgProgram(
+                    title = title,
+                    description = decodeIfBase64(entry.optString("description")),
+                    startEpochSeconds = start,
+                    stopEpochSeconds = stop
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // get_short_epg's contract ("never returns anything already finished")
+    // turned out to not hold on this app's own provider: for some channels
+    // it returns nothing until well over an hour in the future, with no
+    // entry at all covering the real current time - confirmed by directly
+    // comparing its response against wall-clock time. get_simple_data_table
+    // (docs/xtream-api.md's documented "fallback EPG") returns the same
+    // per-channel data but as a much longer window (~180 entries/~1 week,
+    // ignores any limit param - confirmed by testing), which does contain
+    // the real currently-airing program. So "current" is found by scanning
+    // for the entry whose start/stop actually straddles now, not by
+    // trusting entry 0 the way get_short_epg allowed.
+    suspend fun getCurrentAndNextProgram(streamId: Int): Pair<EpgProgram?, EpgProgram?> {
+        val body = getJson(playerApiUrl("get_simple_data_table", "&stream_id=$streamId"))
+        val programs = try {
+            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return null to null
+            (0 until listings.length()).mapNotNull { i ->
+                val entry = listings.getJSONObject(i)
+                val start = entry.optString("start_timestamp").toLongOrNull() ?: return@mapNotNull null
+                val stop = entry.optString("stop_timestamp").toLongOrNull() ?: return@mapNotNull null
+                val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                EpgProgram(
+                    title = title,
+                    description = decodeIfBase64(entry.optString("description")),
+                    startEpochSeconds = start,
+                    stopEpochSeconds = stop
+                )
+            }.sortedBy { it.startEpochSeconds }
+        } catch (e: Exception) {
+            return null to null
+        }
+        val nowEpochSeconds = System.currentTimeMillis() / 1000
+        val currentIndex = programs.indexOfFirst { nowEpochSeconds < it.stopEpochSeconds }
+        if (currentIndex == -1) return null to null
+        val current = programs[currentIndex]
+        val isCurrentlyAiring = nowEpochSeconds >= current.startEpochSeconds
+        val next = programs.getOrNull(currentIndex + 1)
+        return if (isCurrentlyAiring) current to next else null to current
     }
 
     private fun decodeIfBase64(value: String): String {

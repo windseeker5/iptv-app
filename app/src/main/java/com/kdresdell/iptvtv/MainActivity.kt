@@ -8,9 +8,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.kdresdell.iptvtv.theme.IptvTvTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // Favorites ("My Channel" in the rail) is the app's home screen. The
@@ -91,12 +95,23 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
             episode.title.let { if (it.isNotBlank()) " - $it" else "" },
         loadDescription = { episode.description }
     )
+    is PlayableItem.Recording -> PlayerParams(
+        title = RecordingStorage.displayName(file),
+        iconUrl = "",
+        streamUrl = file.toURI().toString(),
+        contentId = file.absolutePath.hashCode(),
+        isLive = false,
+        subtitle = java.text.SimpleDateFormat("MMM d - HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(file.lastModified())),
+        loadDescription = { null }
+    )
 }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+          IptvTvTheme {
             val context = LocalContext.current
             val prefs = remember { ProviderPrefs(context) }
             val favoritesStore = remember { FavoritesStore(context) }
@@ -110,6 +125,32 @@ class MainActivity : ComponentActivity() {
             var searchHistory by remember { mutableStateOf(searchHistoryStore.load()) }
             var savedMovies by remember { mutableStateOf(vodFavoritesStore.loadMovies()) }
             var savedSeries by remember { mutableStateOf(vodFavoritesStore.loadSeries()) }
+            var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+            val coroutineScope = rememberCoroutineScope()
+            LaunchedEffect(Unit) {
+                try {
+                    val update = UpdateChecker().checkForUpdate()
+                    if (update != null && update.versionCode > BuildConfig.VERSION_CODE) {
+                        availableUpdate = update
+                    }
+                } catch (e: Exception) {
+                    AppLog.log("Update check failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+            val onUpdateClick: () -> Unit = {
+                val update = availableUpdate
+                if (update != null) {
+                    val checker = UpdateChecker()
+                    coroutineScope.launch {
+                        try {
+                            val apkFile = checker.downloadApk(context, update)
+                            checker.installApk(context, apkFile)
+                        } catch (e: Exception) {
+                            AppLog.log("Update install failed: ${e.javaClass.simpleName}: ${e.message}")
+                        }
+                    }
+                }
+            }
             // Hoisted (not owned by SearchScreen) so the Search screen's
             // BackHandler can inspect/clear it: first Back clears an
             // in-progress search and stays on the page, matching how search
@@ -154,6 +195,57 @@ class MainActivity : ComponentActivity() {
             }
             val onSelectRail: (RailItem) -> Unit = { item -> screen = item.toScreen() }
 
+            // Shared across both places that show the EPG timeline grid (the
+            // My TV home screen and the OK-button info+guide overlay while
+            // watching live) so there's exactly one fetch/cache path, not
+            // two - and so the guide has fresh data no matter which of those
+            // two screens is current when it's opened.
+            val epgApi = remember(credentials) { XtreamApi(credentials) }
+            var epgWindows by remember { mutableStateOf<Map<Int, List<EpgProgram>>>(emptyMap()) }
+            LaunchedEffect(favorites) {
+                val cached = withContext(Dispatchers.IO) {
+                    favorites.associate { channel ->
+                        channel.streamId to channelDb.getCachedEpgWindow(channel.streamId)
+                    }
+                }
+                epgWindows = cached
+                // Programs change every 30-60min, so this cache is refreshed
+                // far more often than the single-program "Now:" subtitle
+                // cache elsewhere (channel_epg, isEpgStale/24h) - one
+                // get_short_epg call per stale favorite, never the whole
+                // provider catalog.
+                //
+                // Looping with a delay (rather than a one-shot check keyed
+                // only on `favorites`) matters: get_short_epg returns a fixed
+                // number of upcoming programs, not a rolling window, so real
+                // time keeps advancing past it while the app just sits on My
+                // TV - without this loop the guide silently runs out of
+                // program data and the timeline goes blank past whatever was
+                // fetched when the screen/app was last (re)opened.
+                val maxAgeMillis = 30 * 60 * 1000L
+                while (true) {
+                    favorites.forEach { channel ->
+                        val stale = withContext(Dispatchers.IO) {
+                            channelDb.isEpgWindowStale(channel.streamId, maxAgeMillis)
+                        }
+                        if (stale) {
+                            val programs = try {
+                                epgApi.getEpgWindow(channel.streamId)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                            if (programs.isNotEmpty()) {
+                                withContext(Dispatchers.IO) {
+                                    channelDb.setEpgWindow(channel.streamId, programs)
+                                }
+                                epgWindows = epgWindows + (channel.streamId to programs)
+                            }
+                        }
+                    }
+                    delay(maxAgeMillis)
+                }
+            }
+
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -165,61 +257,34 @@ class MainActivity : ComponentActivity() {
                                 prefs.save(saved)
                                 credentials = saved
                                 screen = Screen.Favorites
-                            }
+                            },
+                            availableUpdate = availableUpdate,
+                            onUpdateClick = onUpdateClick
                         )
                     } else {
                         BackHandler { screen = Screen.Favorites }
-                        WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                        WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                             SettingsScreen(
                                 initial = credentials,
                                 onSave = { saved ->
                                     prefs.save(saved)
                                     credentials = saved
                                     screen = Screen.Favorites
-                                }
+                                },
+                                availableUpdate = availableUpdate,
+                                onUpdateClick = onUpdateClick
                             )
                         }
                     }
                 }
 
                 is Screen.Favorites -> {
-                    val api = remember(credentials) { XtreamApi(credentials) }
-                    var nowPlaying by remember { mutableStateOf<Map<Int, NowPlayingInfo>>(emptyMap()) }
-                    LaunchedEffect(favorites) {
-                        val cached = withContext(Dispatchers.IO) {
-                            favorites.mapNotNull { channel ->
-                                channelDb.getCachedNowPlaying(channel.streamId)?.let { channel.streamId to it }
-                            }.toMap()
-                        }
-                        nowPlaying = cached
-                        // 24h refresh, matching "this is a shortlist, not the
-                        // full catalog" - one get_short_epg call per stale
-                        // favorite, never the whole provider catalog.
-                        val maxAgeMillis = 24 * 60 * 60 * 1000L
-                        favorites.forEach { channel ->
-                            val stale = withContext(Dispatchers.IO) {
-                                channelDb.isEpgStale(channel.streamId, maxAgeMillis)
-                            }
-                            if (stale) {
-                                val info = try {
-                                    api.getNowPlayingInfo(channel.streamId)
-                                } catch (e: Exception) {
-                                    null
-                                }
-                                if (info != null) {
-                                    withContext(Dispatchers.IO) {
-                                        channelDb.setNowPlaying(channel.streamId, info)
-                                    }
-                                    nowPlaying = nowPlaying + (channel.streamId to info)
-                                }
-                            }
-                        }
-                    }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         FavoritesScreen(
                             favorites = favorites,
-                            nowPlaying = nowPlaying,
+                            epgWindows = epgWindows,
                             defaultStreamId = defaultStreamId,
+                            streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
                             onPlay = { channel ->
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = Screen.Favorites)
                             },
@@ -242,7 +307,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         CategoryListScreen(
                             state = categoriesState,
                             onSelectCategory = { category -> screen = Screen.Channels(category) }
@@ -263,7 +328,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         ChannelListScreen(
                             categoryName = currentScreen.category.categoryName,
                             state = channelsState,
@@ -292,6 +357,17 @@ class MainActivity : ComponentActivity() {
                     var syncedLiveCount by remember(credentials) { mutableStateOf(0) }
                     var syncedVodCount by remember(credentials) { mutableStateOf(0) }
                     var syncedSeriesCount by remember(credentials) { mutableStateOf(0) }
+                    // §6.4 subscription progress bar - fetched once,
+                    // independently of the catalog sync above (a failure
+                    // here should never block search).
+                    var accountInfo by remember(credentials) { mutableStateOf<AccountInfo?>(null) }
+                    LaunchedEffect(credentials) {
+                        accountInfo = try {
+                            api.getAccountInfo()
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
                     LaunchedEffect(credentials) {
                         syncState = try {
                             if (channelDb.isEmpty()) {
@@ -303,12 +379,20 @@ class MainActivity : ComponentActivity() {
                             if (channelDb.isSeriesEmpty()) {
                                 api.syncAllSeriesInto(channelDb) { count -> syncedSeriesCount = count }
                             }
+                            // The counters above only move while a sync is
+                            // actually running - on a returning session the
+                            // catalog is already populated and every sync
+                            // call is skipped, so read the real totals back
+                            // from the database instead of leaving them at 0.
+                            syncedLiveCount = channelDb.countLiveChannels()
+                            syncedVodCount = channelDb.countVodStreams()
+                            syncedSeriesCount = channelDb.countSeries()
                             LoadState.Success(Unit)
                         } catch (e: Exception) {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         SearchScreen(
                             query = searchQuery,
                             onQueryChange = { searchQuery = it },
@@ -316,6 +400,8 @@ class MainActivity : ComponentActivity() {
                             syncedLiveCount = syncedLiveCount,
                             syncedVodCount = syncedVodCount,
                             syncedSeriesCount = syncedSeriesCount,
+                            accountCreatedAt = accountInfo?.createdAtEpochSeconds,
+                            accountExpiresAt = accountInfo?.expDateEpochSeconds,
                             history = searchHistory,
                             onSearch = { query -> withContext(Dispatchers.IO) { channelDb.searchAll(query) } },
                             onRecordHistory = { term -> searchHistory = searchHistoryStore.add(term) },
@@ -332,23 +418,47 @@ class MainActivity : ComponentActivity() {
                             onOpenEpisodes = { series -> screen = Screen.SeriesEpisodes(series, returnTo = Screen.Search) },
                             onToggleFavorite = toggleFavorite,
                             onToggleMovieSaved = toggleMovieSaved,
-                            onToggleSeriesSaved = toggleSeriesSaved
+                            onToggleSeriesSaved = toggleSeriesSaved,
+                            defaultStreamId = defaultStreamId,
+                            onSetDefault = onSetDefault,
+                            getCachedNowPlaying = { id -> channelDb.getCachedNowPlaying(id) },
+                            isEpgStale = { id -> channelDb.isEpgStale(id, 24 * 60 * 60 * 1000L) },
+                            onFetchNowPlaying = { id ->
+                                try {
+                                    api.getNowPlayingInfo(id)
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            },
+                            onCacheNowPlaying = { id, info -> channelDb.setNowPlaying(id, info) }
                         )
                     }
                 }
 
                 is Screen.MyVod -> {
                     BackHandler { screen = Screen.Favorites }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail) {
+                    var recordings by remember { mutableStateOf(RecordingStorage.listRecordings(context)) }
+                    LaunchedEffect(currentScreen) {
+                        recordings = RecordingStorage.listRecordings(context)
+                    }
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         MyVodScreen(
                             savedMovies = savedMovies,
                             savedSeries = savedSeries,
+                            recordings = recordings,
                             onPlayMovie = { movie ->
                                 screen = Screen.NowPlaying(PlayableItem.Vod(movie), returnTo = Screen.MyVod)
                             },
                             onOpenEpisodes = { series -> screen = Screen.SeriesEpisodes(series, returnTo = Screen.MyVod) },
+                            onPlayRecording = { file ->
+                                screen = Screen.NowPlaying(PlayableItem.Recording(file), returnTo = Screen.MyVod)
+                            },
                             onRemoveMovie = toggleMovieSaved,
-                            onRemoveSeries = toggleSeriesSaved
+                            onRemoveSeries = toggleSeriesSaved,
+                            onDeleteRecording = { file ->
+                                RecordingStorage.deleteRecording(file)
+                                recordings = RecordingStorage.listRecordings(context)
+                            }
                         )
                     }
                 }
@@ -366,7 +476,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = null, onSelectRail = onSelectRail) {
+                    WithRail(selected = null, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         SeriesEpisodesScreen(
                             seriesName = currentScreen.series.name,
                             state = episodesState,
@@ -407,18 +517,6 @@ class MainActivity : ComponentActivity() {
                         subtitle = params.subtitle,
                         loadDescription = params.loadDescription,
                         onSelectRail = onSelectRail,
-                        onPlayItem = { newItem -> screen = Screen.NowPlaying(newItem, returnTo = currentScreen.returnTo) },
-                        favorites = favorites,
-                        defaultStreamId = defaultStreamId,
-                        isFavorite = isFavorite,
-                        onToggleFavorite = toggleFavorite,
-                        onSetDefault = onSetDefault,
-                        savedMovies = savedMovies,
-                        savedSeries = savedSeries,
-                        isMovieSaved = isMovieSaved,
-                        isSeriesSaved = isSeriesSaved,
-                        onToggleMovieSaved = toggleMovieSaved,
-                        onToggleSeriesSaved = toggleSeriesSaved,
                         onChannelChange = { direction ->
                             if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
                                 val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size
@@ -431,6 +529,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+          }
         }
     }
 }

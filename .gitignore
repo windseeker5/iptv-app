@@ -9,4 +9,6 @@ captures/
 .cxx/
 *.apk
 *.aab
+*.jks
+*.keystore
 /local.properties

@@ -1,5 +1,7 @@
 package com.kdresdell.iptvtv
 
+import java.io.File
+
 // What's currently loaded in the player - unifies live channels, VOD
 // movies, and series episodes under one type so MainActivity can have a
 // single "now playing" screen instead of three separate ones. That
@@ -10,4 +12,5 @@ sealed class PlayableItem {
     data class Live(val channel: LiveChannel) : PlayableItem()
     data class Vod(val movie: VodStream) : PlayableItem()
     data class Episode(val episode: SeriesEpisode, val seriesName: String, val cover: String) : PlayableItem()
+    data class Recording(val file: File) : PlayableItem()
 }

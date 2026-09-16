@@ -11,13 +11,14 @@ import android.database.sqlite.SQLiteOpenHelper
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 6) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 7) {
 
     override fun onCreate(db: SQLiteDatabase) {
         createLiveChannelsTable(db)
         createEpgTable(db)
         createVodStreamsTable(db)
         createSeriesTable(db)
+        createEpgWindowTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -37,6 +38,9 @@ class LiveChannelDatabase(context: Context) :
         }
         if (oldVersion < 6) {
             createSeriesTable(db)
+        }
+        if (oldVersion < 7) {
+            createEpgWindowTable(db)
         }
     }
 
@@ -93,6 +97,83 @@ class LiveChannelDatabase(context: Context) :
             )
             """.trimIndent()
         )
+    }
+
+    // Multi-program window per channel, for the My TV guide's EPG timeline
+    // grid (STYLE_GUIDE.md §6.3) - separate from channel_epg above, which
+    // only ever holds a single "what's on right now" row for the simpler
+    // "Now: <title>" subtitle used elsewhere (Search, channel lists).
+    private fun createEpgWindowTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS channel_epg_window (
+                stream_id INTEGER NOT NULL,
+                start_epoch INTEGER NOT NULL,
+                stop_epoch INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                fetched_at INTEGER NOT NULL,
+                PRIMARY KEY (stream_id, start_epoch)
+            )
+            """.trimIndent()
+        )
+    }
+
+    fun setEpgWindow(streamId: Int, programs: List<EpgProgram>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("channel_epg_window", "stream_id = ?", arrayOf(streamId.toString()))
+            val statement = db.compileStatement(
+                "INSERT OR REPLACE INTO channel_epg_window " +
+                    "(stream_id, start_epoch, stop_epoch, title, description, fetched_at) VALUES (?, ?, ?, ?, ?, ?)"
+            )
+            val fetchedAt = System.currentTimeMillis()
+            programs.forEach { program ->
+                statement.clearBindings()
+                statement.bindLong(1, streamId.toLong())
+                statement.bindLong(2, program.startEpochSeconds)
+                statement.bindLong(3, program.stopEpochSeconds)
+                statement.bindString(4, program.title)
+                statement.bindString(5, program.description)
+                statement.bindLong(6, fetchedAt)
+                statement.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun getCachedEpgWindow(streamId: Int): List<EpgProgram> {
+        val results = mutableListOf<EpgProgram>()
+        readableDatabase.rawQuery(
+            "SELECT start_epoch, stop_epoch, title, description FROM channel_epg_window " +
+                "WHERE stream_id = ? ORDER BY start_epoch",
+            arrayOf(streamId.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    EpgProgram(
+                        title = cursor.getString(2),
+                        description = cursor.getString(3),
+                        startEpochSeconds = cursor.getLong(0),
+                        stopEpochSeconds = cursor.getLong(1)
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    fun isEpgWindowStale(streamId: Int, maxAgeMillis: Long): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT MAX(fetched_at) FROM channel_epg_window WHERE stream_id = ?",
+            arrayOf(streamId.toString())
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return true
+            return System.currentTimeMillis() - cursor.getLong(0) > maxAgeMillis
+        }
     }
 
     // Only ever called for favorited channels (a handful, not the whole
@@ -158,6 +239,21 @@ class LiveChannelDatabase(context: Context) :
             return cursor.getInt(0) == 0
         }
     }
+
+    // §6.4 search KPI row - the real catalog totals, not just the running
+    // counter a sync-in-progress callback reports (which stays 0 forever on
+    // a returning session where the sync is skipped because the table is
+    // already populated).
+    private fun countRows(table: String): Int {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { cursor ->
+            cursor.moveToFirst()
+            return cursor.getInt(0)
+        }
+    }
+
+    fun countLiveChannels(): Int = countRows("live_channels")
+    fun countVodStreams(): Int = countRows("vod_streams")
+    fun countSeries(): Int = countRows("series")
 
     // channels is consumed lazily and inserted in one transaction, so the
     // full catalog never needs to exist as a Kotlin List at any point.
