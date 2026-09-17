@@ -2,6 +2,7 @@ package com.kdresdell.iptvtv
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +20,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -112,6 +117,9 @@ private fun Callout(title: String, body: String, dotColor: Color = OnSurfaceVari
 // correct if this is ever shown outside the rail's TV-themed layout.
 @Composable
 fun HelpScreen() {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
     MaterialTheme(colorScheme = darkColorScheme()) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -121,6 +129,15 @@ fun HelpScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 64.dp, vertical = 40.dp)
+                // This screen has no Card/text-field to naturally hold
+                // focus (plain Text/Canvas only) - WithRail's "return focus
+                // to content" call needs a real target to land on, or it
+                // silently fails and focus never actually leaves the rail.
+                // Confirmed bug: Right did nothing and Back exited the app
+                // outright while "on" Help, because focus was still in the
+                // rail the whole time.
+                .focusRequester(focusRequester)
+                .focusable()
         ) {
             // Title - normal flow, reserves its own space so nothing below
             // can ever overlap it (an earlier design draft absolutely
