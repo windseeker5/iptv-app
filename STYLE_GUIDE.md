@@ -208,7 +208,7 @@ concrete recipe:
 | State | Treatment |
 |---|---|
 | Default | Surface container tone (2.5), no scale, no outline |
-| Focused | Scale **1.05×** [Google range: 1.025–1.1×] · outline **2dp** width, **2dp** inset, color = vivid accent `#06F906` · glow: 8dp diffused shadow, same color at 40% opacity · surface tint steps up one tonal level |
+| Focused | Scale **1.05×** [Google range: 1.025–1.1×] · outline **2dp** width, **2dp** inset, color = vivid accent `#06F906` · glow: 8dp diffused shadow, same color at 40% opacity · surface tint steps up one tonal level — briefly tried 1dp after a "border looks too big" report on real hardware, but a pixel-level check showed the outline itself was already correctly thin; the bulk was the glow's soft bleed, not the line. 1dp also under-serves 10-foot viewing (TV's whole reason to use a visible outline, not a hairline). Reverted to 2dp. |
 | Pressed | Same as focused, scale reduced to **1.02×**, glow opacity raised to 60% |
 | Disabled | Surface tone unchanged, content opacity **38%** (M3 default disabled-content opacity), no focus ring possible |
 | Selected (persistent, e.g. active nav item, current tab) | Neutral elevated surface `#232823` (not a green fill — validated against the side-nav mockup, a solid green fill read as "ugly"/alert-like) + bold on-surface text, icon tinted primary tone-80 `#A6F2A6`. Survives focus moving elsewhere; focus glow (above) still layers on top when a selected item also has focus. |
@@ -267,7 +267,7 @@ matching what the `DirectionRight` key handler already did.
 |---|---|---|
 | Navigation Drawer | `SideRail.kt` | Persistent left rail; selected item uses "Selected" state from §5; icon + Label Medium text; see §6.2 for the approved recipe |
 | Lists | `ChannelRow.kt`, `VodTiles.kt` (`VodRow`/`SeriesRow`), `ChannelListScreen.kt`, `CategoryListScreen.kt`, `SearchScreen.kt`, `FavoritesScreen.kt`, `MyVodScreen.kt` | Full-width rows, Title Medium primary text, Body Medium secondary (channel number, "now playing"); short press plays/opens, long press (native `Card` `onLongClick`) opens `RowActionsMenu.kt` |
-| Cards | `VodTiles.kt`, `MyVodScreen.kt`, `SeriesEpisodesScreen.kt`, `FavoritesScreen.kt` | Poster art fills card, title overlay uses Title Small on a scrim gradient, not a solid surface (keeps art legible) |
+| Cards | `VodTiles.kt`, `MyVodScreen.kt`, `SeriesEpisodesScreen.kt`, `FavoritesScreen.kt` | Poster grid cards (`PosterCard` in `VodTiles.kt`) show art only, no title overlay — tried a scrim + Title Small overlay first, dropped per explicit direction ("remove the text... I don't need that for movie and series") since the artwork alone is enough to recognize a title in the grid. `SeriesEpisodesScreen.kt`'s episode cards are a separate text-card variant (§6.6) since episodes have no per-item artwork. |
 | Context menu | `RowActionsMenu.kt`, `RecordingDurationMenu.kt` | Long-press popup, generalized to a plain `List<MenuAction>` (label, `onClick`, `isDestructive`) rather than hardcoded favorite/default slots — lets `RecordingRow`'s "Remove from Recordings" be a real destructive action instead of a fake favorite toggle. Centered on screen (`Popup(alignment = Alignment.Center)`) over a 60%-black scrim, so it lands in the same predictable spot regardless of which row/how close to an edge triggered it — an earlier version had no alignment at all and rendered wherever Compose's default popup placement happened to land ("placed weirdly"). **No container background** — items float directly on the scrim, `Arrangement.spacedBy(8.dp)` apart, inside a fixed `width(340.dp)` `Column` (not `widthIn(min=...)` — a `fillMaxWidth()` item inside an unconstrained `Column` forces the whole `Column` to claim the full screen width instead of shrinking to content, confirmed on-device). An earlier version wrapped the items in a surface-container-highest `#353B35` box, which just read as an ugly grey box padded around already-styled buttons — removed. Items: `fillMaxWidth()` `Card`s using the real §5 focus recipe **minus scale** — `appCardBorder()`/`appCardGlow()` plus `appRowCardScale()` (not `appCardScale()`), the same "no scale-up on focus" exception full-width rows use (§5): a focused menu item growing larger than an unfocused one is the identical bug already fixed for list rows, just recurring here. An earlier version left items fully unstyled (library defaults) before that, which is what actually produced the "two different-size grey squares" look despite this row's older text claiming otherwise. Destructive actions render their label in the Error tone (`#F2B8B5`, §2.7). Dismissed via Back or picking an item; the focus-immediately + 500ms grace-window dismissal logic (absorbing the stray key-up from releasing a physical long-press) is unchanged and duplicated intentionally across both files rather than shared, per their own code comments. |
 | Featured Carousel | *(not yet built)* | Reserved for a future home-screen hero row; full-width per §4.2 "1 card" |
 | Immersive List | *(not yet built)* | Candidate for a future "Continue Watching" row |
@@ -416,13 +416,16 @@ https://claude.ai/artifact/Do7THdbuLMM8m6wASoN6c7, iterated to final. Two connec
 screens reached from the side nav's **All** item (§6.2):
 
 - **All** (`CategoryListScreen.kt`): single-column list of categories (§6 "Lists"
-  row pattern). **Favorites pinned first** (star icon, primary tone-80 `#A6F2A6`
-  text), then **All channels**, then the provider's category groups in whatever
-  order the API returns them. Quality tags (e.g. "RAW · 60FPS") render as small
-  muted (`#6C766C`) text under the category name where the provider supplies them.
-  Channel count right-aligned per row. A chevron on the right signals "this row
-  drills into another screen" — distinct from channel rows, which play/toggle
-  instead of navigating deeper.
+  row pattern), a chevron on the right signaling "this row drills into another
+  screen" — distinct from channel rows, which play/toggle instead of navigating
+  deeper. **Implemented deviation from the original proposal**: no synthetic
+  "Favorites pinned first" / "All channels" rows, and no quality-tag line or
+  channel count — `LiveCategory` (`XtreamApi.kt`) carries only an id and a name,
+  and the side rail's own **My TV** item already covers "favorites" as a separate
+  screen; fabricating a count or a tag with no backing data would violate the
+  app's "never fabricate" rule (see §6.5's subscription meter, §6.6's in-progress
+  indicator). Revisit if a bulk categories-with-counts endpoint or a quality-tag
+  field is ever added.
 - **Channel list** (`ChannelListScreen.kt`): reached after picking a category. Row =
   channel logo (rounded-square) + name + "Now: <program>" subtitle + a favorite-star
   toggle (filled primary tone-80 when favorited, outline `#5B635B` otherwise).
@@ -591,9 +594,37 @@ the side nav's **My Librairie** item (§6.2) — the user's saved VOD and series
 - **In-progress indicator**: a thin vivid-accent (`#06F906`) progress bar overlaid
   near the bottom of a partially-watched poster — reuses the exact color convention
   from the player overlay's progress bar (§6.1), so green consistently means
-  "playback position" everywhere in the app, never anything else.
+  "playback position" everywhere in the app, never anything else. **Not
+  implemented** — the app has no watch-position tracking for VOD/series yet, and
+  per the app's "never fabricate" rule (§6.5's subscription meter) this stays a
+  design intent, not a fake/random bar, until real playback-position data exists.
 - Card focus: standard §5 recipe (scale + outline + glow, vivid accent `#06F906`),
-  same as every other card in the app.
+  same as every other card in the app — **not** the row exception (§5), since
+  poster cards are a real grid, not full-width rows.
+- **Recordings** aren't part of the approved mockup (no reference photo covers
+  them, and `SeriesEpisode`/recorded files carry no poster art to grid). Kept as
+  a third section below Movies/Series, styled to match (Headline Small header +
+  count) but rendered as the existing full-width row list, not a poster grid.
+- **Poster cards show art only, no title overlay** — tried a bottom-scrim +
+  Title Small overlay first (matching the original mockup), removed per explicit
+  direction: the artwork itself is enough to recognize a saved title, text on top
+  of it didn't add anything.
+- `SeriesEpisodesScreen.kt` (the episode picker, reached by opening a series) was
+  redesigned around a real request instead of the original mockup, which didn't
+  cover this screen: **poster + title + synopsis header** at the top (series-level
+  `plot` from `get_series_info`'s root `info` object, newly parsed in
+  `XtreamApi.getSeriesEpisodes` → `SeriesDetails`), then each season as a heading
+  followed by a **3-card (268dp) grid** of episode cards — wider than the 124dp
+  poster density since each card carries text, not art (episodes have no
+  per-item artwork). Each card shows `E<n> · <title>` plus that episode's own
+  synopsis (`SeriesEpisode.description`, already parsed, previously unused in
+  the UI) **only when the provider actually supplies one** — many providers
+  return it blank, and the card just shows the number/title in that case, never
+  a fabricated line.
+- **Type sizes cut one step down the scale** after a "titles are too big" report
+  on real hardware — series name: Headline Large → **Headline Small**. Season
+  heading: Headline Small → **Title Large**. Episode card text: Title Small →
+  **Label Medium** (16sp, the app's type floor from §3.2 — can't go smaller).
 
 ### 6.7 Settings & forms (`SettingsScreen.kt`)
 

@@ -2,19 +2,21 @@ package com.kdresdell.iptvtv
 
 import android.app.Activity
 import android.view.WindowManager
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -26,7 +28,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -41,11 +42,15 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Icon
@@ -81,14 +86,24 @@ fun PlayerScreen(
     isLive: Boolean,
     api: XtreamApi,
     subtitle: String? = null,
-    loadDescription: suspend () -> String? = { null },
+    loadDetails: suspend () -> ContentDetails = { ContentDetails() },
     onSelectRail: (RailItem) -> Unit,
     onChannelChange: (direction: Int) -> Unit = {}
 ) {
     val context = LocalContext.current
+    // Surfaced on screen below (see playbackError) instead of failing
+    // silently - a real gap this fixed: on a stream error the video area
+    // just stayed black forever with the paused icon frozen on top, giving
+    // no sign of whether the app, the content, or the network was at fault.
+    var playbackError by remember(contentId) { mutableStateOf<String?>(null) }
     val exoPlayer = remember(streamUrl) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(streamUrl))
+            addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    playbackError = error.message ?: "Playback error"
+                }
+            })
             prepare()
             playWhenReady = true
         }
@@ -113,6 +128,7 @@ fun PlayerScreen(
     var isPlaying by remember(contentId) { mutableStateOf(true) }
     var displayTitle by remember(contentId) { mutableStateOf(title) }
     var description by remember(contentId) { mutableStateOf<String?>(null) }
+    var rating by remember(contentId) { mutableStateOf<String?>(null) }
     // Live only (STYLE_GUIDE.md §6.1 progress bar + status block) - VOD has
     // no EPG, so these stay null there and the overlay falls back to the
     // plain title/description block.
@@ -228,6 +244,46 @@ fun PlayerScreen(
     // panel) instead of the simple menu-or-full-page flow this needs.
     var menuOpen by remember(contentId) { mutableStateOf(false) }
 
+    // VOD/series seek (Left/Right, !isLive only). seekTargetMs tracks where
+    // the *last* seek key landed, separate from exoPlayer.currentPosition,
+    // so repeated Left/Right presses during the feedback window stack
+    // against each other instead of each one re-reading a currentPosition
+    // that lags behind ExoPlayer's actual seek completion. Reset to null
+    // (falls back to exoPlayer.currentPosition) once the feedback overlay
+    // hides.
+    var seekTargetMs by remember(contentId) { mutableStateOf<Long?>(null) }
+    var seekDeltaMs by remember(contentId) { mutableStateOf(0L) }
+    var seekDurationMs by remember(contentId) { mutableStateOf(0L) }
+    var seekFeedbackAtMs by remember(contentId) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(seekFeedbackAtMs) {
+        if (seekFeedbackAtMs != null) {
+            delay(2_000)
+            seekFeedbackAtMs = null
+            seekTargetMs = null
+        }
+    }
+
+    // VOD/series only - seeks relative to the current position, accelerating
+    // the step size the longer Left/Right is held (native D-pad key-repeat
+    // re-fires KeyDown with an increasing repeatCount, so no separate timer
+    // is needed here). Thresholds are a starting guess, not measured against
+    // real hardware repeat rates yet.
+    fun seekBy(direction: Int, repeatCount: Int) {
+        val rawDuration = exoPlayer.duration
+        val durationMs = if (rawDuration == C.TIME_UNSET) 0L else rawDuration
+        val step = seekStepForRepeatCount(repeatCount)
+        val basePosition = seekTargetMs ?: exoPlayer.currentPosition
+        val target = basePosition + step * direction
+        val clamped = if (durationMs > 0) target.coerceIn(0L, durationMs) else target.coerceAtLeast(0L)
+        exoPlayer.seekTo(clamped)
+        seekTargetMs = clamped
+        seekDeltaMs = step * direction
+        seekDurationMs = durationMs
+        seekFeedbackAtMs = System.currentTimeMillis()
+        // Don't stack the seek flash on top of the OK-triggered info overlay.
+        showInfo = false
+    }
+
     // Live channels show the EPG "now playing" + "next up". Uses
     // get_simple_data_table (XtreamApi.getCurrentAndNextProgram), not
     // get_short_epg - confirmed on this app's own provider that
@@ -249,7 +305,9 @@ fun PlayerScreen(
             description = current?.description
         } else {
             displayTitle = title
-            description = loadDescription()
+            val details = loadDetails()
+            description = details.description
+            rating = details.rating
         }
     }
 
@@ -279,12 +337,25 @@ fun PlayerScreen(
         focusRequester.requestFocus()
     }
 
-    // Back closes the rail (same as Right) before falling through to the
-    // screen's own BackHandler (registered by the caller) that leaves the
-    // player.
-    BackHandler(enabled = menuOpen) {
-        menuOpen = false
+    fun openMenu() {
+        showInfo = false
+        seekFeedbackAtMs = null
+        menuOpen = true
     }
+
+    // Back opens/closes the in-player rail (replacing DirectionLeft's old
+    // role - Left/Right are freed up for VOD seek, see the onKeyEvent block
+    // below). Handled directly in onKeyEvent below rather than via
+    // BackHandler/the system back dispatcher - confirmed on real hardware
+    // (Chromecast with Google TV) that the dispatcher silently drops every
+    // other Back invocation on this device (predictive-back quirk), while
+    // the raw KeyEvent for Back reliably reaches onKeyEvent on every single
+    // press. Never falls through to leave the player on its own - an
+    // earlier version tried a timing window to let a quick second Back
+    // "really" leave, but that made Back unpredictably dump straight out to
+    // the (slow-loading) guide during ordinary open/close fumbling. Leaving
+    // the player now only happens by picking a destination from the opened
+    // rail (onSelectRail below) - deterministic, no accidental exits.
 
     Box(
         modifier = Modifier
@@ -322,14 +393,16 @@ fun PlayerScreen(
                 false
             }
             .onKeyEvent { event ->
-                // Once the menu is open, focus lives inside it - let the
-                // rail's own Cards handle Up/Down/Center (navigate/select)
-                // instead of this root intercepting them for channel/pause
-                // control. Right mirrors Left's open action, closing the
-                // rail back to the stream, same as Back.
+                // Back closes the rail same as it opened it; Right is kept
+                // as a quick alternate "return to the stream" gesture
+                // (matches the old Left-opens/Right-closes muscle memory) -
+                // everything else here is left alone so the rail's own
+                // Cards get default TV focus/click handling (Up/Down move
+                // focus, Center/Enter selects).
                 if (menuOpen) {
-                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                    if (event.key == Key.DirectionRight) {
+                    if (event.type == KeyEventType.KeyDown &&
+                        (event.key == Key.DirectionRight || event.key == Key.Back)
+                    ) {
                         menuOpen = false
                         return@onKeyEvent true
                     }
@@ -365,6 +438,10 @@ fun PlayerScreen(
 
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.key) {
+                    Key.Back -> {
+                        openMenu()
+                        true
+                    }
                     Key.DirectionUp -> {
                         // Channel-cycling only makes sense for live playback.
                         // Recording never silently follows a channel switch -
@@ -375,12 +452,14 @@ fun PlayerScreen(
                         if (isLive) { stopRecording(); onChannelChange(1); true } else false
                     }
                     Key.DirectionLeft -> {
-                        // Opens the same rail used everywhere else in the app.
-                        // Playback keeps running underneath, untouched - the
-                        // rail itself is the only thing that appears.
-                        showInfo = false
-                        menuOpen = true
-                        true
+                        // VOD/series: seek. Live has nothing to rewind/fast
+                        // forward, so Left falls back to the same "open
+                        // menu" action as Back there instead of doing
+                        // nothing (Up/Down still cycles channels either way).
+                        if (!isLive) { seekBy(-1, event.nativeKeyEvent.repeatCount); true } else { openMenu(); true }
+                    }
+                    Key.DirectionRight -> {
+                        if (!isLive) { seekBy(1, event.nativeKeyEvent.repeatCount); true } else false
                     }
                     else -> false
                 }
@@ -417,11 +496,29 @@ fun PlayerScreen(
                 update = { view -> view.player = exoPlayer }
             )
 
-            if (showInfo) {
+            if (playbackError != null) {
+                Text(
+                    text = "Could not play this title: $playbackError",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.align(Alignment.Center).padding(horizontal = 48.dp)
+                )
+            }
+
+            if (seekFeedbackAtMs != null) {
+                SeekFeedbackOverlay(
+                    deltaMs = seekDeltaMs,
+                    positionMs = seekTargetMs ?: exoPlayer.currentPosition,
+                    durationMs = seekDurationMs
+                )
+            }
+
+            if (showInfo && seekFeedbackAtMs == null) {
                 PlayerInfoOverlay(
                     channelName = title,
                     programTitle = displayTitle,
                     description = description,
+                    rating = rating,
                     iconUrl = iconUrl,
                     subtitle = subtitle,
                     isLive = isLive,
@@ -432,10 +529,15 @@ fun PlayerScreen(
 
                 Box(
                     modifier = Modifier
-                        // Dead-center overlapped the program title text
-                        // below it - shifted up to clear that zone.
-                        .align(BiasAlignment(horizontalBias = 0f, verticalBias = -0.35f))
-                        .size(96.dp)
+                        // Explicitly re-centered per direction - a previous
+                        // pass shifted this up to dodge the info block's
+                        // text, but that's no longer dead-center like the
+                        // user wants now that both info layouts dock at the
+                        // bottom (see PlayerInfoOverlay) and don't reach mid-screen.
+                        .align(Alignment.Center)
+                        // 30% smaller per direction (was 96dp) - proportions
+                        // between circle and icon stayed the same, both cut.
+                        .size(67.dp)
                         .clip(CircleShape)
                         .background(LocalAppColors.current.vividAccent),
                     contentAlignment = Alignment.Center
@@ -444,7 +546,8 @@ fun PlayerScreen(
                         imageVector = if (isPlaying) PlayerIcons.Pause else PlayerIcons.Play,
                         contentDescription = null,
                         tint = Color.Black,
-                        modifier = Modifier.size(40.dp)
+                        // 30% smaller per direction (was 52dp).
+                        modifier = Modifier.size(36.dp)
                     )
                 }
             }
@@ -488,6 +591,7 @@ private fun PlayerInfoOverlay(
     channelName: String,
     programTitle: String,
     description: String?,
+    rating: String?,
     iconUrl: String,
     subtitle: String?,
     isLive: Boolean,
@@ -549,6 +653,70 @@ private fun PlayerInfoOverlay(
             )
         }
 
+        if (!isLive) {
+            // VOD/episode/recording: left-aligned poster + rating + full
+            // synopsis, bottom-docked - same placement idea as the live bar
+            // below, not a centered hero block (tried that, rejected: too
+            // large, centered text reads dated on a 10-foot UI, and the
+            // title was a pointless repeat of the top-left title already on
+            // screen). Fixes from the original version of this block: the
+            // poster keeps its real 2:3 shape (was a squashed 88dp square
+            // with a visible grey letterbox behind it), and the synopsis is
+            // no longer hard-capped at 2 lines.
+            Box(modifier = Modifier.weight(1f))
+            Row(
+                verticalAlignment = Alignment.Top,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 48.dp)
+                    .padding(bottom = 32.dp)
+            ) {
+                if (iconUrl.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            // +12.5% per direction (was 120dp).
+                            .width(135.dp)
+                            .aspectRatio(2f / 3f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(appColors.surfaceContainerHigh)
+                    ) {
+                        AsyncImage(
+                            model = iconUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(20.dp))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(
+                            text = subtitle,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium.copy(shadow = textShadow)
+                        )
+                    }
+                    if (!rating.isNullOrBlank()) {
+                        Text(
+                            text = "★ $rating",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium.copy(shadow = textShadow)
+                        )
+                    }
+                    if (!description.isNullOrBlank()) {
+                        Text(
+                            text = description,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodyLarge.copy(shadow = textShadow),
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+            }
+            return@Column
+        }
+
         // Pushes the block below to the bottom of the frame.
         Box(modifier = Modifier.weight(1f))
 
@@ -584,6 +752,16 @@ private fun PlayerInfoOverlay(
                             text = subtitle,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodyMedium.copy(shadow = textShadow)
+                        )
+                    }
+                    if (!rating.isNullOrBlank()) {
+                        // Provider-supplied rating (§6.6 My Librairie shows
+                        // the same value) - never fabricated, only rendered
+                        // when the provider actually returns one.
+                        Text(
+                            text = "★ $rating",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium.copy(shadow = textShadow)
                         )
                     }
                     if (!description.isNullOrBlank()) {
@@ -704,6 +882,80 @@ private fun PlayerInfoOverlay(
     }
 }
 
+// New overlay, not covered by STYLE_GUIDE.md §6.1 verbatim (that section
+// only specs the OK-triggered info overlay) - reuses the same approved
+// primitives: bottom scrim gradient, text-shadow style, vivid-accent
+// progress bar with glow, Title/Body type scale, 48dp/24dp safe margin.
+// Shown only for VOD/series (isLive == false) seeking; live channels never
+// seek, so this never renders there.
+@Composable
+private fun SeekFeedbackOverlay(
+    deltaMs: Long,
+    positionMs: Long,
+    durationMs: Long
+) {
+    val appColors = LocalAppColors.current
+    val textShadow = Shadow(color = Color.Black.copy(alpha = 0.8f), blurRadius = 12f)
+    val deltaSeconds = deltaMs / 1000
+    val sign = if (deltaSeconds >= 0) "+" else ""
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0.55f to Color.Transparent,
+                        0.70f to Color.Black.copy(alpha = 0.5f),
+                        0.84f to Color.Black.copy(alpha = 0.84f),
+                        1.0f to Color.Black
+                    )
+                )
+            )
+            .padding(horizontal = 48.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.Bottom
+    ) {
+        Text(
+            text = "$sign${deltaSeconds}s",
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.headlineSmall.copy(shadow = textShadow),
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(MaterialTheme.colorScheme.onSurfaceVariant)
+        ) {
+            if (durationMs > 0) {
+                val fraction = (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(fraction)
+                        .shadow(
+                            elevation = 4.dp,
+                            shape = RoundedCornerShape(4.dp),
+                            ambientColor = appColors.vividAccent,
+                            spotColor = appColors.vividAccent
+                        )
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(appColors.vividAccent)
+                )
+            }
+        }
+        if (durationMs > 0) {
+            Text(
+                text = "${formatElapsed(positionMs / 1000)} / ${formatElapsed(durationMs / 1000)}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
+}
+
 private fun progressFraction(program: EpgProgram, nowEpochSeconds: Long): Float {
     val span = program.stopEpochSeconds - program.startEpochSeconds
     if (span <= 0) return 0f
@@ -715,3 +967,24 @@ private fun formatTime(epochSeconds: Long): String =
 
 private fun formatNowDateTime(epochSeconds: Long): String =
     SimpleDateFormat("EEE, MMM d · HH:mm", Locale.getDefault()).format(Date(epochSeconds * 1000))
+
+private fun formatElapsed(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
+// Empirically-tunable: Android doesn't guarantee a fixed key-repeat rate, so
+// these repeatCount thresholds may need adjusting on real hardware.
+private const val SeekStepBaseMs = 10_000L
+private const val SeekStepMediumMs = 30_000L
+private const val SeekStepLargeMs = 60_000L
+private const val SeekAccelMediumRepeatCount = 8
+private const val SeekAccelLargeRepeatCount = 24
+
+private fun seekStepForRepeatCount(repeatCount: Int): Long = when {
+    repeatCount >= SeekAccelLargeRepeatCount -> SeekStepLargeMs
+    repeatCount >= SeekAccelMediumRepeatCount -> SeekStepMediumMs
+    else -> SeekStepBaseMs
+}

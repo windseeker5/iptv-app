@@ -172,6 +172,31 @@ object RailIcons {
         }
     }
 
+    // §6.5 channel-list back button (top-left, replaces the old bottom
+    // "Back to categories" Card). Lucide "arrow-left": <path d="M19 12H5"/>
+    // <path d="m12 19-7-7 7-7"/>
+    val ArrowLeft: ImageVector = strokeIcon("RailArrowLeft") {
+        strokePath {
+            moveTo(19f, 12f)
+            horizontalLineTo(5f)
+        }
+        strokePath {
+            moveTo(12f, 19f)
+            lineToRelative(-7f, -7f)
+            lineToRelative(7f, -7f)
+        }
+    }
+
+    // §6.5 category-row "drills into another screen" affordance. Lucide
+    // "chevron-right": <path d="m9 18 6-6-6-6"/>
+    val ChevronRight: ImageVector = strokeIcon("RailChevronRight") {
+        strokePath {
+            moveTo(9f, 18f)
+            lineToRelative(6f, -6f)
+            lineToRelative(-6f, -6f)
+        }
+    }
+
     // <rect .../> x4, 7x7 rx1.5, at (3,3) (14,3) (3,14) (14,14)
     val All: ImageVector = strokeIcon("RailAll") {
         listOf(3f to 3f, 14f to 3f, 3f to 14f, 14f to 14f).forEach { (x, y) ->
@@ -229,6 +254,28 @@ object RailIcons {
             horizontalLineToRelative(-0.09f)
             arcTo(1.7f, 1.7f, 0f, false, false, 19.4f, 15f)
             close()
+        }
+    }
+
+    // Feather "help-circle", transcribed the same way as the rest of this
+    // set (not part of the original mockup - added later for the Help
+    // rail entry, same 24x24/2dp stroke conventions as everything above).
+    // <circle cx="12" cy="12" r="10"/>
+    // <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    val Help: ImageVector = strokeIcon("RailHelp") {
+        strokePath {
+            moveTo(22f, 12f)
+            arcToRelative(10f, 10f, 0f, true, true, -20f, 0f)
+            arcToRelative(10f, 10f, 0f, true, true, 20f, 0f)
+        }
+        strokePath {
+            moveTo(9.09f, 9f)
+            arcToRelative(3f, 3f, 0f, false, true, 5.83f, 1f)
+            curveToRelative(0f, 2f, -3f, 3f, -3f, 3f)
+        }
+        strokePath {
+            moveTo(12f, 17f)
+            lineTo(12.01f, 17f)
         }
     }
 }

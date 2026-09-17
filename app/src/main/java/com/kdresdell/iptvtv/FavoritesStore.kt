@@ -22,6 +22,10 @@ class FavoritesStore(context: Context) {
                 )
             }
         } catch (e: Exception) {
+            // Silently returning an empty list here used to mean a corrupt
+            // favorites file looked identical to "no favorites yet" - now
+            // at least visible in Settings' error log.
+            AppLog.log("Load favorites failed (data reset to empty): ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }

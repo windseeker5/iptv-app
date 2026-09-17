@@ -6,9 +6,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -22,20 +25,70 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.kdresdell.iptvtv.theme.LocalAppColors
+import com.kdresdell.iptvtv.theme.ScreenColors
 import com.kdresdell.iptvtv.theme.appCardBorder
 import com.kdresdell.iptvtv.theme.appCardGlow
+import com.kdresdell.iptvtv.theme.appCardScale
 import com.kdresdell.iptvtv.theme.appRowCardColors
 import com.kdresdell.iptvtv.theme.appRowCardScale
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+// §4.2/§4.3, §6.6 - the 5-card (124dp) poster grid density used by My
+// Librairie (VodTiles.kt/MyVodScreen.kt/SeriesEpisodesScreen.kt). Unlike
+// VodRow/SeriesRow below (full-width list rows, no scale on focus), this is
+// a real grid card - standard appCardScale() applies.
+val PosterCardWidth = 124.dp
+
+// One focusable poster: art fills the card, title sits on a bottom scrim
+// (per the approved mockup) rather than a flat surface with side-by-side
+// text. Movies play directly on click; series open the episode picker -
+// both share this same visual, only the click target differs.
+@Composable
+fun PosterCard(
+    title: String,
+    cover: String,
+    isSaved: Boolean,
+    onOpen: () -> Unit,
+    onToggleSaved: () -> Unit,
+    cardModifier: Modifier = Modifier
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
+
+    Card(
+        onClick = onOpen,
+        onLongClick = { menuExpanded = true },
+        modifier = Modifier.width(PosterCardWidth).aspectRatio(2f / 3f).then(cardModifier),
+        scale = appCardScale(),
+        colors = CardDefaults.colors(containerColor = LocalAppColors.current.surfaceContainer),
+        shape = CardDefaults.shape(shape = shape),
+        border = appCardBorder(shape = shape),
+        glow = appCardGlow()
+    ) {
+        AsyncImage(
+            model = cover,
+            contentDescription = title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+
+    RowActionsMenu(
+        expanded = menuExpanded,
+        onDismiss = { menuExpanded = false },
+        actions = listOf(MenuAction(if (isSaved) "Remove from My Librairie" else "Add to My Librairie", onToggleSaved))
+    )
+}
 
 // §6 "Lists" row pattern - 2:3 poster, matches each VOD/series result's real
 // artwork shape (as opposed to LiveThumbnail's 16:9 logo box in ChannelRow.kt).
@@ -182,21 +235,35 @@ fun RecordingRow(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
+    // See ChannelRow.kt / VodRow above - this Card was the one card in the
+    // app left on the tv.material3 library defaults (no appRowCardScale()/
+    // appRowCardColors()/appCardBorder()/appCardGlow()), which reproduces
+    // the exact "focused row scales up huge" bug already fixed everywhere
+    // else - a focused full-width row must never scale.
     Card(
         onClick = onPlay,
         onLongClick = { menuExpanded = true },
-        modifier = Modifier.fillMaxWidth().then(playCardModifier)
+        modifier = Modifier.fillMaxWidth().then(playCardModifier),
+        scale = appRowCardScale(),
+        colors = appRowCardColors(),
+        border = appCardBorder(shape = RoundedCornerShape(8.dp)),
+        glow = appCardGlow()
     ) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(24.dp)
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
-            Text(text = "⏺", color = Color(0xFFE57373))
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(ScreenColors.RecordAccent, CircleShape)
+            )
             Column {
-                Text(text = RecordingStorage.displayName(file))
+                Text(text = RecordingStorage.displayName(file), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 val date = SimpleDateFormat("MMM d - HH:mm", Locale.getDefault()).format(Date(file.lastModified()))
                 val sizeMb = file.length() / (1024 * 1024)
-                Text(text = "$date · $sizeMb MB")
+                Text(text = "$date · $sizeMb MB", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

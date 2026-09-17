@@ -47,6 +47,22 @@ data class SeriesEpisode(
     val description: String = ""
 )
 
+// get_series_info's root-level "info" plot (the show's own synopsis) and
+// rating, plus its episodes - kept together since all three come from the
+// same call and the episode picker (§6.6) shows them together.
+data class SeriesDetails(
+    val description: String,
+    val rating: String,
+    val episodes: List<SeriesEpisode>
+)
+
+// get_vod_info's plot + rating for a movie - same idea as SeriesDetails,
+// one call covers both.
+data class VodDetails(
+    val description: String,
+    val rating: String
+)
+
 data class NowPlayingInfo(
     val title: String,
     val description: String,
@@ -346,14 +362,17 @@ class XtreamApi(private val credentials: ProviderCredentials) {
     // A single series' episodes, grouped by season in the response
     // ("episodes": {"1": [...], "2": [...]}) - small enough per-series to
     // parse as one JSONObject, unlike the full catalogs above.
-    suspend fun getSeriesEpisodes(seriesId: Int): List<SeriesEpisode> {
+    suspend fun getSeriesEpisodes(seriesId: Int): SeriesDetails {
         val body = getJson(playerApiUrl("get_series_info", "&series_id=$seriesId"))
         val root = try {
             JSONObject(body)
         } catch (e: Exception) {
             throw XtreamApiException("Unexpected response loading episodes")
         }
-        val episodesBySeason = root.optJSONObject("episodes") ?: return emptyList()
+        val seriesInfo = root.optJSONObject("info")
+        val seriesDescription = seriesInfo?.optString("plot")?.takeIf { it.isNotBlank() } ?: ""
+        val seriesRating = parseRating(seriesInfo)
+        val episodesBySeason = root.optJSONObject("episodes") ?: return SeriesDetails(seriesDescription, seriesRating, emptyList())
         val episodes = mutableListOf<SeriesEpisode>()
         val seasonKeys = episodesBySeason.keys()
         while (seasonKeys.hasNext()) {
@@ -380,19 +399,33 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                 )
             }
         }
-        return episodes.sortedWith(compareBy({ it.season }, { it.episodeNum }))
+        return SeriesDetails(seriesDescription, seriesRating, episodes.sortedWith(compareBy({ it.season }, { it.episodeNum })))
     }
 
-    // Movie synopsis - not included in get_vod_streams, needs its own call.
-    // Only invoked when a movie is actually opened in the player, never for
-    // the whole catalog.
-    suspend fun getVodDescription(streamId: Int): String {
+    // Provider rating for a movie/series - "rating" is the usual IMDB/TMDB-style
+    // score out of 10; some providers only send "rating_5based" (0-5 stars)
+    // instead. Never fabricated: blank/zero/missing all fall through to "".
+    private fun parseRating(info: JSONObject?): String {
+        val outOfTen = info?.optString("rating")?.trim()?.takeIf { it.isNotBlank() && it.toDoubleOrNull()?.let { v -> v > 0 } == true }
+        if (outOfTen != null) return "$outOfTen/10"
+        val outOfFive = info?.optString("rating_5based")?.trim()?.takeIf { it.isNotBlank() && it.toDoubleOrNull()?.let { v -> v > 0 } == true }
+        if (outOfFive != null) return "$outOfFive/5"
+        return ""
+    }
+
+    // Movie synopsis + rating - not included in get_vod_streams, needs its
+    // own call. Only invoked when a movie is actually opened in the player
+    // or viewed from My Librairie, never for the whole catalog.
+    suspend fun getVodDetails(streamId: Int): VodDetails {
         return try {
             val body = getJson(playerApiUrl("get_vod_info", "&vod_id=$streamId"))
             val info = JSONObject(body).optJSONObject("info")
-            info?.optString("plot")?.takeIf { it.isNotBlank() } ?: ""
+            VodDetails(
+                description = info?.optString("plot")?.takeIf { it.isNotBlank() } ?: "",
+                rating = parseRating(info)
+            )
         } catch (e: Exception) {
-            ""
+            VodDetails("", "")
         }
     }
 

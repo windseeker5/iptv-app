@@ -26,6 +26,7 @@ class VodFavoritesStore(context: Context) {
                 )
             }
         } catch (e: Exception) {
+            AppLog.log("Load saved movies failed (data reset to empty): ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }
@@ -44,6 +45,7 @@ class VodFavoritesStore(context: Context) {
                 )
             }
         } catch (e: Exception) {
+            AppLog.log("Load saved series failed (data reset to empty): ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }

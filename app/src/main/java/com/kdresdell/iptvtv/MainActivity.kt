@@ -2,7 +2,6 @@ package com.kdresdell.iptvtv
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -23,6 +22,7 @@ import kotlinx.coroutines.withContext
 // current, same as selecting a rail item.
 private sealed class Screen {
     data object Settings : Screen()
+    data object Help : Screen()
     data object Favorites : Screen()
     data object MyVod : Screen()
     data object Categories : Screen()
@@ -42,6 +42,7 @@ private fun Screen.toRailItem(): RailItem? = when (this) {
     is Screen.MyVod -> RailItem.MyVod
     is Screen.Categories, is Screen.Channels -> RailItem.Categories
     is Screen.Settings -> RailItem.Settings
+    is Screen.Help -> RailItem.Help
     else -> null
 }
 
@@ -51,11 +52,17 @@ private fun RailItem.toScreen(): Screen = when (this) {
     RailItem.MyVod -> Screen.MyVod
     RailItem.Categories -> Screen.Categories
     RailItem.Settings -> Screen.Settings
+    RailItem.Help -> Screen.Help
 }
 
 // Precomputes everything PlayerScreen needs from a PlayableItem - keeps the
 // three content-type cases (live/VOD/episode) in one place instead of
 // duplicated across separate screen branches.
+// Description + provider rating together, since both come from the same
+// API call for VOD/series - separate suspend fields would mean fetching
+// twice.
+data class ContentDetails(val description: String? = null, val rating: String? = null)
+
 private data class PlayerParams(
     val title: String,
     val iconUrl: String,
@@ -63,7 +70,7 @@ private data class PlayerParams(
     val contentId: Int,
     val isLive: Boolean,
     val subtitle: String?,
-    val loadDescription: suspend () -> String?
+    val loadDetails: suspend () -> ContentDetails
 )
 
 private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (this) {
@@ -74,7 +81,7 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
         contentId = channel.streamId,
         isLive = true,
         subtitle = null,
-        loadDescription = { null }
+        loadDetails = { ContentDetails() }
     )
     is PlayableItem.Vod -> PlayerParams(
         title = movie.name,
@@ -83,7 +90,10 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
         contentId = movie.streamId,
         isLive = false,
         subtitle = null,
-        loadDescription = { api.getVodDescription(movie.streamId) }
+        loadDetails = {
+            val details = api.getVodDetails(movie.streamId)
+            ContentDetails(details.description.ifBlank { null }, details.rating.ifBlank { null })
+        }
     )
     is PlayableItem.Episode -> PlayerParams(
         title = seriesName,
@@ -93,7 +103,7 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
         isLive = false,
         subtitle = "Season ${episode.season} Episode ${episode.episodeNum}" +
             episode.title.let { if (it.isNotBlank()) " - $it" else "" },
-        loadDescription = { episode.description }
+        loadDetails = { ContentDetails(episode.description.ifBlank { null }) }
     )
     is PlayableItem.Recording -> PlayerParams(
         title = RecordingStorage.displayName(file),
@@ -103,7 +113,7 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
         isLive = false,
         subtitle = java.text.SimpleDateFormat("MMM d - HH:mm", java.util.Locale.getDefault())
             .format(java.util.Date(file.lastModified())),
-        loadDescription = { null }
+        loadDetails = { ContentDetails() }
     )
 }
 
@@ -151,11 +161,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            // Hoisted (not owned by SearchScreen) so the Search screen's
-            // BackHandler can inspect/clear it: first Back clears an
-            // in-progress search and stays on the page, matching how search
-            // works elsewhere on TV; only a second Back (query already
-            // empty) leaves to Favorites.
             var searchQuery by remember { mutableStateOf("") }
             // Computed once, at cold start: if a default channel is set and
             // still among the favorites, launch straight into it instead of
@@ -262,7 +267,6 @@ class MainActivity : ComponentActivity() {
                             onUpdateClick = onUpdateClick
                         )
                     } else {
-                        BackHandler { screen = Screen.Favorites }
                         WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                             SettingsScreen(
                                 initial = credentials,
@@ -275,6 +279,12 @@ class MainActivity : ComponentActivity() {
                                 onUpdateClick = onUpdateClick
                             )
                         }
+                    }
+                }
+
+                is Screen.Help -> {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                        HelpScreen()
                     }
                 }
 
@@ -295,7 +305,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.Categories -> {
-                    BackHandler { screen = Screen.Favorites }
                     val api = remember(credentials) { XtreamApi(credentials) }
                     var categoriesState by remember(credentials) {
                         mutableStateOf<LoadState<List<LiveCategory>>>(LoadState.Loading)
@@ -304,6 +313,7 @@ class MainActivity : ComponentActivity() {
                         categoriesState = try {
                             LoadState.Success(api.getLiveCategories())
                         } catch (e: Exception) {
+                            AppLog.log("Load categories failed: ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
@@ -316,7 +326,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.Channels -> {
-                    BackHandler { screen = Screen.Categories }
                     val api = remember(credentials) { XtreamApi(credentials) }
                     var channelsState by remember(currentScreen.category) {
                         mutableStateOf<LoadState<List<LiveChannel>>>(LoadState.Loading)
@@ -325,6 +334,7 @@ class MainActivity : ComponentActivity() {
                         channelsState = try {
                             LoadState.Success(api.getLiveStreams(currentScreen.category.categoryId))
                         } catch (e: Exception) {
+                            AppLog.log("Load channels failed (${currentScreen.category.categoryName}): ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
@@ -343,13 +353,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.Search -> {
-                    BackHandler {
-                        if (searchQuery.isNotBlank()) {
-                            searchQuery = ""
-                        } else {
-                            screen = Screen.Favorites
-                        }
-                    }
                     val api = remember(credentials) { XtreamApi(credentials) }
                     var syncState by remember(credentials) {
                         mutableStateOf<LoadState<Unit>>(LoadState.Loading)
@@ -365,6 +368,7 @@ class MainActivity : ComponentActivity() {
                         accountInfo = try {
                             api.getAccountInfo()
                         } catch (e: Exception) {
+                            AppLog.log("Load account info failed: ${e.javaClass.simpleName}: ${e.message}")
                             null
                         }
                     }
@@ -389,6 +393,7 @@ class MainActivity : ComponentActivity() {
                             syncedSeriesCount = channelDb.countSeries()
                             LoadState.Success(Unit)
                         } catch (e: Exception) {
+                            AppLog.log("Catalog sync failed: ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
@@ -436,7 +441,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.MyVod -> {
-                    BackHandler { screen = Screen.Favorites }
                     var recordings by remember { mutableStateOf(RecordingStorage.listRecordings(context)) }
                     LaunchedEffect(currentScreen) {
                         recordings = RecordingStorage.listRecordings(context)
@@ -464,21 +468,22 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.SeriesEpisodes -> {
-                    BackHandler { screen = currentScreen.returnTo }
                     val api = remember(credentials) { XtreamApi(credentials) }
                     var episodesState by remember(currentScreen.series) {
-                        mutableStateOf<LoadState<List<SeriesEpisode>>>(LoadState.Loading)
+                        mutableStateOf<LoadState<SeriesDetails>>(LoadState.Loading)
                     }
                     LaunchedEffect(currentScreen.series) {
                         episodesState = try {
                             LoadState.Success(api.getSeriesEpisodes(currentScreen.series.seriesId))
                         } catch (e: Exception) {
+                            AppLog.log("Load episodes failed (${currentScreen.series.name}): ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
                     WithRail(selected = null, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         SeriesEpisodesScreen(
                             seriesName = currentScreen.series.name,
+                            seriesCover = currentScreen.series.cover,
                             state = episodesState,
                             onSelectEpisode = { episode ->
                                 screen = Screen.NowPlaying(
@@ -496,7 +501,13 @@ class MainActivity : ComponentActivity() {
 
                 is Screen.NowPlaying -> {
                     val api = remember(credentials) { XtreamApi(credentials) }
-                    BackHandler { screen = currentScreen.returnTo }
+                    // PlayerScreen consumes Back directly in its own
+                    // onKeyEvent (see PlayerScreen.kt), never via
+                    // BackHandler - confirmed on real hardware that
+                    // BackHandler/predictive back silently drops every other
+                    // invocation, which is exactly why PlayerScreen doesn't
+                    // rely on it (same reason WithRail's Back handling in
+                    // SideRail.kt uses raw onKeyEvent too).
                     val item = currentScreen.item
                     val params = remember(item) { item.toPlayerParams(api) }
                     // Up/down channel-cycling always cycles through favorites
@@ -515,7 +526,7 @@ class MainActivity : ComponentActivity() {
                         isLive = params.isLive,
                         api = api,
                         subtitle = params.subtitle,
-                        loadDescription = params.loadDescription,
+                        loadDetails = params.loadDetails,
                         onSelectRail = onSelectRail,
                         onChannelChange = { direction ->
                             if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {

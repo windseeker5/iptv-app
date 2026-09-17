@@ -3,11 +3,13 @@ package com.kdresdell.iptvtv
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -20,9 +22,12 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import java.io.File
 
-// Saved movies and series - separate from live-channel Favorites (now
-// "My Channel") since VOD playback is a different flow (direct play for
-// movies, an episode picker for series).
+// §6.6 My Librairie - saved movies and series, poster-grid browse screen
+// (separate from live-channel My TV/Favorites, since VOD playback is a
+// different flow: direct play for movies, an episode picker for series).
+// Recordings aren't part of the approved mockup (poster art doesn't exist
+// for them) - kept as a plain row section below the poster grids, same
+// treatment it always had.
 @Composable
 fun MyVodScreen(
     savedMovies: List<VodStream>,
@@ -36,8 +41,10 @@ fun MyVodScreen(
     onDeleteRecording: (File) -> Unit
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
+    val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
     val isEmpty = savedMovies.isEmpty() && savedSeries.isEmpty() && recordings.isEmpty()
     val firstItemFocus = remember { FocusRequester() }
+    val totalCount = savedMovies.size + savedSeries.size + recordings.size
 
     // See CategoryListScreen for why this is needed - without it, D-pad
     // focus lands nowhere when this screen opens.
@@ -50,56 +57,124 @@ fun MyVodScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentAlignment = Alignment.Center
+            .background(MaterialTheme.colorScheme.background)
     ) {
+        if (isEmpty) {
+            Text(
+                text = "No saved movies, shows, or recordings yet - use Search to add some",
+                color = onSurfaceVariant,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            return@Box
+        }
+
         LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(24.dp)
+            verticalArrangement = Arrangement.spacedBy(28.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 48.dp, vertical = 24.dp)
         ) {
             item {
-                Text(
-                    text = if (isEmpty) "No saved movies, shows, or recordings yet - use Search to add some" else "My VOD",
-                    color = onBackground,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            itemsIndexed(savedMovies) { index, movie ->
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    VodRow(
-                        movie = movie,
-                        isSaved = true,
-                        onPlay = { onPlayMovie(movie) },
-                        onToggleSaved = { onRemoveMovie(movie) },
-                        playCardModifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(text = "My Librairie", style = MaterialTheme.typography.headlineLarge, color = onBackground, modifier = Modifier.alignByBaseline())
+                    Text(text = "$totalCount titles", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
                 }
             }
-            itemsIndexed(savedSeries) { index, series ->
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    SeriesRow(
-                        series = series,
-                        isSaved = true,
-                        onOpenEpisodes = { onOpenEpisodes(series) },
-                        onToggleSaved = { onRemoveSeries(series) },
-                        playCardModifier = if (index == 0 && savedMovies.isEmpty()) Modifier.focusRequester(firstItemFocus) else Modifier
-                    )
-                }
-            }
-            itemsIndexed(recordings) { index, file ->
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    RecordingRow(
-                        file = file,
-                        onPlay = { onPlayRecording(file) },
-                        onDelete = { onDeleteRecording(file) },
-                        playCardModifier = if (index == 0 && savedMovies.isEmpty() && savedSeries.isEmpty()) {
-                            Modifier.focusRequester(firstItemFocus)
-                        } else {
-                            Modifier
+            if (savedMovies.isNotEmpty()) {
+                item {
+                    PosterSection(
+                        title = "Movies",
+                        count = savedMovies.size,
+                        headingColor = onBackground,
+                        countColor = onSurfaceVariant
+                    ) {
+                        savedMovies.forEachIndexed { index, movie ->
+                            PosterCard(
+                                title = movie.name,
+                                cover = movie.streamIcon,
+                                isSaved = true,
+                                onOpen = { onPlayMovie(movie) },
+                                onToggleSaved = { onRemoveMovie(movie) },
+                                cardModifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
+                            )
                         }
-                    )
+                    }
                 }
             }
+            if (savedSeries.isNotEmpty()) {
+                item {
+                    PosterSection(
+                        title = "Series",
+                        count = savedSeries.size,
+                        headingColor = onBackground,
+                        countColor = onSurfaceVariant
+                    ) {
+                        savedSeries.forEachIndexed { index, series ->
+                            PosterCard(
+                                title = series.name,
+                                cover = series.cover,
+                                isSaved = true,
+                                onOpen = { onOpenEpisodes(series) },
+                                onToggleSaved = { onRemoveSeries(series) },
+                                cardModifier = if (index == 0 && savedMovies.isEmpty()) {
+                                    Modifier.focusRequester(firstItemFocus)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            if (recordings.isNotEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(text = "Recordings", style = MaterialTheme.typography.headlineSmall, color = onBackground, modifier = Modifier.alignByBaseline())
+                            Text(text = "${recordings.size}", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            recordings.forEachIndexed { index, file ->
+                                RecordingRow(
+                                    file = file,
+                                    onPlay = { onPlayRecording(file) },
+                                    onDelete = { onDeleteRecording(file) },
+                                    playCardModifier = if (index == 0 && savedMovies.isEmpty() && savedSeries.isEmpty()) {
+                                        Modifier.focusRequester(firstItemFocus)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// §6.6 - poster-grid section: Headline Small header + count, then a
+// wrapping 5-card (124dp) grid that grows downward as the library grows.
+@Composable
+private fun PosterSection(
+    title: String,
+    count: Int,
+    headingColor: androidx.compose.ui.graphics.Color,
+    countColor: androidx.compose.ui.graphics.Color,
+    content: @Composable () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(text = title, style = MaterialTheme.typography.headlineSmall, color = headingColor, modifier = Modifier.alignByBaseline())
+            Text(text = "$count", style = MaterialTheme.typography.labelMedium, color = countColor, modifier = Modifier.alignByBaseline())
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            content()
         }
     }
 }

@@ -60,7 +60,8 @@ enum class RailItem(val icon: ImageVector, val label: String) {
     MyChannel(RailIcons.MyTv, "My TV"),
     MyVod(RailIcons.MyLibrairie, "My Librairie"),
     Categories(RailIcons.All, "All"),
-    Settings(RailIcons.Settings, "Settings")
+    Settings(RailIcons.Settings, "Settings"),
+    Help(RailIcons.Help, "Help")
 }
 
 // Persistent left-side navigation, always visible next to whatever screen
@@ -133,6 +134,7 @@ fun SideRail(
             }
         }
         Spacer(modifier = Modifier.weight(1f))
+        RailRow(item = RailItem.Help, selected = selected, onSelect = onSelect)
         RailRow(item = RailItem.Settings, selected = selected, onSelect = onSelect, showAlert = hasSettingsAlert)
     }
 }
@@ -242,13 +244,25 @@ fun WithRail(
                 // left (every single-column screen in the app, or the
                 // leftmost item of a row).
                 .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
-                        if (!focusManager.moveFocus(FocusDirection.Left)) {
-                            railFirstItemFocusRequester.requestFocus()
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.DirectionLeft -> {
+                            if (!focusManager.moveFocus(FocusDirection.Left)) {
+                                railFirstItemFocusRequester.requestFocus()
+                            }
+                            true
                         }
-                        true
-                    } else {
-                        false
+                        // Back always opens the menu outright, unlike Left -
+                        // it never tries a local focus move first, since
+                        // Back should never double as sideways navigation
+                        // (see [[navigation_model_spec]] memory: Back and
+                        // Left do the same thing everywhere outside the
+                        // player, uniformly, no exceptions).
+                        Key.Back -> {
+                            railFirstItemFocusRequester.requestFocus()
+                            true
+                        }
+                        else -> false
                     }
                 }
         ) {
@@ -264,6 +278,13 @@ fun WithRail(
                         contentFocusRequester.requestFocus()
                         true
                     } else {
+                        // Back while the menu itself has focus is deliberately
+                        // left unconsumed here (see [[navigation_model_spec]]
+                        // memory) - with no BackHandler registered anywhere
+                        // to intercept it, this falls through to Android's
+                        // default back action and exits/backgrounds the app.
+                        // That is the *only* way to exit: Back opens the menu
+                        // (above), Back again while it's focused exits.
                         false
                     }
                 }
