@@ -103,7 +103,7 @@ fun ChannelRow(
                         Text(text = "★", color = Color(0xFFA6F2A6))
                     }
                     // §6 "Lists": Title Small primary text.
-                    Text(text = channel.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                    Text(text = TitleFormat.clean(channel.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 }
                 if (subtitle != null) {
                     // §6 "Lists": Body Medium secondary text.

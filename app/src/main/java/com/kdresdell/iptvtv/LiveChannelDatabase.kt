@@ -11,7 +11,21 @@ import android.database.sqlite.SQLiteOpenHelper
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 7) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 8) {
+
+    init {
+        // WAL mode lets concurrent readers proceed without blocking behind
+        // a writer, using a real connection pool instead of one shared
+        // connection - confirmed necessary on real hardware (2026-09-17):
+        // once the My TV guide loop started fetching/caching up to ~20
+        // channels' EPG concurrently (see MainActivity's coroutineScope +
+        // async), plus the player reading/writing this same database at the
+        // same time, the default single-connection journal mode threw
+        // SQLiteDatabaseLockedException ("database is locked") and crashed
+        // the app under that contention. Must be set before the database is
+        // first opened, hence here in init rather than onConfigure/onOpen.
+        setWriteAheadLoggingEnabled(true)
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         createLiveChannelsTable(db)
@@ -19,6 +33,8 @@ class LiveChannelDatabase(context: Context) :
         createVodStreamsTable(db)
         createSeriesTable(db)
         createEpgWindowTable(db)
+        createVodDetailsTable(db)
+        createSeriesDetailsTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -41,6 +57,10 @@ class LiveChannelDatabase(context: Context) :
         }
         if (oldVersion < 7) {
             createEpgWindowTable(db)
+        }
+        if (oldVersion < 8) {
+            createVodDetailsTable(db)
+            createSeriesDetailsTables(db)
         }
     }
 
@@ -173,6 +193,134 @@ class LiveChannelDatabase(context: Context) :
         ).use { cursor ->
             if (!cursor.moveToFirst() || cursor.isNull(0)) return true
             return System.currentTimeMillis() - cursor.getLong(0) > maxAgeMillis
+        }
+    }
+
+    // Movie synopsis/rating (get_vod_info), cached on-demand: fetched once
+    // on first open, then instant on every later open - no TTL, since a
+    // catalog title's plot/rating essentially never changes once published.
+    // fetched_at is still stored for consistency with the rest of this
+    // file's caches and as a future-diagnostic hook, not for expiry.
+    private fun createVodDetailsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS vod_details (
+                stream_id INTEGER PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                rating TEXT NOT NULL DEFAULT '',
+                fetched_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+    }
+
+    fun getCachedVodDetails(streamId: Int): VodDetails? {
+        readableDatabase.rawQuery(
+            "SELECT description, rating FROM vod_details WHERE stream_id = ?",
+            arrayOf(streamId.toString())
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            return VodDetails(description = cursor.getString(0), rating = cursor.getString(1))
+        }
+    }
+
+    fun setVodDetails(streamId: Int, details: VodDetails) {
+        writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO vod_details (stream_id, description, rating, fetched_at) VALUES (?, ?, ?, ?)",
+            arrayOf(streamId, details.description, details.rating, System.currentTimeMillis())
+        )
+    }
+
+    // Series synopsis/rating + full episode list (get_series_info), cached
+    // on-demand the same way as vod_details above - same no-TTL rationale.
+    private fun createSeriesDetailsTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS series_details (
+                series_id INTEGER PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                rating TEXT NOT NULL DEFAULT '',
+                fetched_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS series_episodes (
+                series_id INTEGER NOT NULL,
+                episode_id INTEGER NOT NULL,
+                season INTEGER NOT NULL,
+                episode_num INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                container_extension TEXT NOT NULL DEFAULT 'mp4',
+                description TEXT NOT NULL DEFAULT '',
+                fetched_at INTEGER NOT NULL,
+                PRIMARY KEY (series_id, episode_id)
+            )
+            """.trimIndent()
+        )
+    }
+
+    fun getCachedSeriesDetails(seriesId: Int): SeriesDetails? {
+        val (description, rating) = readableDatabase.rawQuery(
+            "SELECT description, rating FROM series_details WHERE series_id = ?",
+            arrayOf(seriesId.toString())
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            cursor.getString(0) to cursor.getString(1)
+        }
+        val episodes = mutableListOf<SeriesEpisode>()
+        readableDatabase.rawQuery(
+            "SELECT episode_id, episode_num, season, title, container_extension, description " +
+                "FROM series_episodes WHERE series_id = ? ORDER BY season, episode_num",
+            arrayOf(seriesId.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                episodes.add(
+                    SeriesEpisode(
+                        episodeId = cursor.getInt(0),
+                        episodeNum = cursor.getInt(1),
+                        season = cursor.getInt(2),
+                        title = cursor.getString(3),
+                        containerExtension = cursor.getString(4),
+                        description = cursor.getString(5)
+                    )
+                )
+            }
+        }
+        return SeriesDetails(description = description, rating = rating, episodes = episodes)
+    }
+
+    fun setSeriesDetails(seriesId: Int, details: SeriesDetails) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "INSERT OR REPLACE INTO series_details (series_id, description, rating, fetched_at) VALUES (?, ?, ?, ?)",
+                arrayOf(seriesId, details.description, details.rating, System.currentTimeMillis())
+            )
+            db.delete("series_episodes", "series_id = ?", arrayOf(seriesId.toString()))
+            val statement = db.compileStatement(
+                "INSERT OR REPLACE INTO series_episodes " +
+                    "(series_id, episode_id, season, episode_num, title, container_extension, description, fetched_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            val fetchedAt = System.currentTimeMillis()
+            details.episodes.forEach { episode ->
+                statement.clearBindings()
+                statement.bindLong(1, seriesId.toLong())
+                statement.bindLong(2, episode.episodeId.toLong())
+                statement.bindLong(3, episode.season.toLong())
+                statement.bindLong(4, episode.episodeNum.toLong())
+                statement.bindString(5, episode.title)
+                statement.bindString(6, episode.containerExtension)
+                statement.bindString(7, episode.description)
+                statement.bindLong(8, fetchedAt)
+                statement.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 

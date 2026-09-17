@@ -18,6 +18,23 @@ object RecordingStorage {
         return if (recordingsDir.exists() || recordingsDir.mkdirs()) recordingsDir else null
     }
 
+    // Used by the Settings toggle to confirm a drive is actually usable
+    // before letting the user enable recording - not just mounted, but
+    // writable (a full or read-only-mounted drive would otherwise pass
+    // findRecordingDirectory's mkdirs() check and then fail silently the
+    // first time a recording actually starts).
+    fun isDriveAvailable(context: Context): Boolean {
+        val dir = findRecordingDirectory(context) ?: return false
+        return try {
+            val probe = File(dir, ".write_test")
+            val ok = probe.createNewFile() || probe.exists()
+            probe.delete()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun listRecordings(context: Context): List<File> {
         val dir = findRecordingDirectory(context) ?: return emptyList()
         return dir.listFiles { file -> file.extension == "ts" }

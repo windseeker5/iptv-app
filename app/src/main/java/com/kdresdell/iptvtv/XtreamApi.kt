@@ -451,12 +451,22 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
-    // Fetches a window of programs (current + upcoming - get_short_epg never
-    // returns anything already finished) for one channel's EPG timeline row.
+    // get_short_epg's contract ("never returns anything already finished")
+    // turned out to not hold on this app's own provider: for some channels
+    // it returns nothing until well over an hour in the future, with no
+    // entry at all covering the real current time - confirmed by directly
+    // comparing its response against wall-clock time. get_simple_data_table
+    // (docs/xtream-api.md's documented "fallback EPG") returns the same
+    // per-channel data but as a much longer window (~180 entries/~1 week,
+    // ignores any limit param - confirmed by testing), which does contain
+    // the real currently-airing program. This is now the ONLY EPG-window
+    // fetch in the app (get_short_epg's getEpgWindow was removed
+    // 2026-09-17) - both the guide grid and the player read from the cache
+    // this populates instead of each having their own endpoint/cache.
     // Entries missing a title or either timestamp are dropped: a program
     // that can't be timed can't be placed on the grid.
-    suspend fun getEpgWindow(streamId: Int, limit: Int = 12): List<EpgProgram> {
-        val body = getJson(playerApiUrl("get_short_epg", "&stream_id=$streamId&limit=$limit"))
+    suspend fun fetchEpgWindow(streamId: Int): List<EpgProgram> {
+        val body = getJson(playerApiUrl("get_simple_data_table", "&stream_id=$streamId"))
         return try {
             val listings = JSONObject(body).optJSONArray("epg_listings") ?: return emptyList()
             (0 until listings.length()).mapNotNull { i ->
@@ -470,49 +480,31 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                     startEpochSeconds = start,
                     stopEpochSeconds = stop
                 )
-            }
+            }.sortedBy { it.startEpochSeconds }
         } catch (e: Exception) {
             emptyList()
         }
     }
 
-    // get_short_epg's contract ("never returns anything already finished")
-    // turned out to not hold on this app's own provider: for some channels
-    // it returns nothing until well over an hour in the future, with no
-    // entry at all covering the real current time - confirmed by directly
-    // comparing its response against wall-clock time. get_simple_data_table
-    // (docs/xtream-api.md's documented "fallback EPG") returns the same
-    // per-channel data but as a much longer window (~180 entries/~1 week,
-    // ignores any limit param - confirmed by testing), which does contain
-    // the real currently-airing program. So "current" is found by scanning
-    // for the entry whose start/stop actually straddles now, not by
-    // trusting entry 0 the way get_short_epg allowed.
-    suspend fun getCurrentAndNextProgram(streamId: Int): Pair<EpgProgram?, EpgProgram?> {
-        val body = getJson(playerApiUrl("get_simple_data_table", "&stream_id=$streamId"))
-        val programs = try {
-            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return null to null
-            (0 until listings.length()).mapNotNull { i ->
-                val entry = listings.getJSONObject(i)
-                val start = entry.optString("start_timestamp").toLongOrNull() ?: return@mapNotNull null
-                val stop = entry.optString("stop_timestamp").toLongOrNull() ?: return@mapNotNull null
-                val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                EpgProgram(
-                    title = title,
-                    description = decodeIfBase64(entry.optString("description")),
-                    startEpochSeconds = start,
-                    stopEpochSeconds = stop
-                )
-            }.sortedBy { it.startEpochSeconds }
-        } catch (e: Exception) {
-            return null to null
+    // Pure scan, no network - runs equally well against a fresh
+    // fetchEpgWindow() result or a cached list read back from
+    // channel_epg_window, so the player can derive current/next from
+    // whatever the guide already cached without a second network call.
+    suspend fun getCurrentAndNextProgram(streamId: Int): Pair<EpgProgram?, EpgProgram?> =
+        currentAndNextFrom(fetchEpgWindow(streamId))
+
+    companion object {
+        fun currentAndNextFrom(
+            programs: List<EpgProgram>,
+            nowEpochSeconds: Long = System.currentTimeMillis() / 1000
+        ): Pair<EpgProgram?, EpgProgram?> {
+            val currentIndex = programs.indexOfFirst { nowEpochSeconds < it.stopEpochSeconds }
+            if (currentIndex == -1) return null to null
+            val current = programs[currentIndex]
+            val isCurrentlyAiring = nowEpochSeconds >= current.startEpochSeconds
+            val next = programs.getOrNull(currentIndex + 1)
+            return if (isCurrentlyAiring) current to next else null to current
         }
-        val nowEpochSeconds = System.currentTimeMillis() / 1000
-        val currentIndex = programs.indexOfFirst { nowEpochSeconds < it.stopEpochSeconds }
-        if (currentIndex == -1) return null to null
-        val current = programs[currentIndex]
-        val isCurrentlyAiring = nowEpochSeconds >= current.startEpochSeconds
-        val next = programs.getOrNull(currentIndex + 1)
-        return if (isCurrentlyAiring) current to next else null to current
     }
 
     private fun decodeIfBase64(value: String): String {

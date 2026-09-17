@@ -1,7 +1,12 @@
 package com.kdresdell.iptvtv
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.view.WindowManager
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,9 +69,11 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // Playback URLs contain the provider username/password in plain text -
 // never log streamUrl.
@@ -85,12 +92,23 @@ fun PlayerScreen(
     contentId: Int,
     isLive: Boolean,
     api: XtreamApi,
+    channelDb: LiveChannelDatabase,
     subtitle: String? = null,
     loadDetails: suspend () -> ContentDetails = { ContentDetails() },
     onSelectRail: (RailItem) -> Unit,
     onChannelChange: (direction: Int) -> Unit = {}
 ) {
     val context = LocalContext.current
+    // Recording is opt-in (see RecordingPrefs/SettingsScreen) - off by
+    // default since most Google TV boxes have no drive attached. Checking
+    // the saved toggle alone isn't enough - confirmed on real hardware
+    // (2026-09-17) that pulling the drive without revisiting Settings first
+    // left the toggle stale at "on", which still let the record hint and
+    // duration menu show here even though nothing would actually record.
+    // Re-checking the drive too, once per screen instance, closes that gap.
+    val recordingEnabled = remember {
+        RecordingPrefs.isEnabled(context) && RecordingStorage.isDriveAvailable(context)
+    }
     // Surfaced on screen below (see playbackError) instead of failing
     // silently - a real gap this fixed: on a stream error the video area
     // just stayed black forever with the paused icon frozen on top, giving
@@ -175,6 +193,9 @@ fun PlayerScreen(
     }
 
     fun startRecording(durationMinutes: Int?) {
+        // Re-checked here, not just at long-press time: the setting or the
+        // drive itself could have changed since this screen was entered.
+        if (!recordingEnabled) return
         val dir = RecordingStorage.findRecordingDirectory(context)
         if (dir == null) {
             AppLog.log("Recording failed: no USB drive found")
@@ -198,6 +219,16 @@ fun PlayerScreen(
                         recordedBytes = bytesWritten
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal stop path (Back, channel change, leaving the
+                // screen) cancels this coroutine's scope - Compose's own
+                // ForgottenCoroutineScopeException surfaces here as this.
+                // Confirmed on real hardware (2026-09-17) it was getting
+                // caught by the broad Exception branch below and logged as
+                // a scary "Recording error" for completely normal
+                // stop-while-recording navigation - rethrown instead so it
+                // just completes the coroutine like any other cancellation.
+                throw e
             } catch (e: Exception) {
                 AppLog.log("Recording error: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
@@ -212,6 +243,36 @@ fun PlayerScreen(
     // below for the "leaving the screen" half of that.
     DisposableEffect(Unit) {
         onDispose { liveRecorder.stop() }
+    }
+
+    // Confirmed on real hardware (2026-09-17): pulling the USB drive
+    // mid-recording doesn't surface as a catchable IOException at all.
+    // vold notices the app still holds the recording file open, sends the
+    // process a kill signal to force it closed, and the whole app dies
+    // ("Sending Interrupt to pid ...", then "Process ... has died") before
+    // any try/catch in startRecording ever runs. The only way to survive
+    // this is to close the file ourselves *before* vold's kill deadline -
+    // ACTION_MEDIA_EJECT/UNMOUNTED/BAD_REMOVAL fire the moment the unmount
+    // starts, giving a brief window to react. Registered only while
+    // actually recording, since that's the only time an open file handle
+    // on removable media is at risk.
+    DisposableEffect(isRecording) {
+        if (!isRecording) return@DisposableEffect onDispose {}
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receivedContext: Context, intent: Intent) {
+                AppLog.log("Recording stopped - USB drive was disconnected")
+                stopRecording()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_MEDIA_EJECT)
+            addAction(Intent.ACTION_MEDIA_UNMOUNTED)
+            addAction(Intent.ACTION_MEDIA_BAD_REMOVAL)
+            addAction(Intent.ACTION_MEDIA_REMOVED)
+            addDataScheme("file")
+        }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose { context.unregisterReceiver(receiver) }
     }
 
     // The lockout screen replaces the *video view*, but ExoPlayer itself
@@ -284,18 +345,34 @@ fun PlayerScreen(
         showInfo = false
     }
 
-    // Live channels show the EPG "now playing" + "next up". Uses
-    // get_simple_data_table (XtreamApi.getCurrentAndNextProgram), not
-    // get_short_epg - confirmed on this app's own provider that
-    // get_short_epg can return nothing covering the real current time for
-    // some channels (entries starting an hour+ in the future), which is
-    // what caused the progress bar / status lines to show the wrong
-    // program. VOD movies and series episodes show their own synopsis via
+    // Live channels show the EPG "now playing" + "next up". Reads from the
+    // same channel_epg_window cache the My TV guide populates instead of
+    // always making its own network call - confirmed on real hardware
+    // (2026-09-17) that tuning a favorited channel right after the guide
+    // loaded it now shows now/next instantly with zero network wait. Only
+    // falls back to a fresh fetchEpgWindow (get_simple_data_table, not
+    // get_short_epg - that endpoint can return nothing covering the real
+    // current time for some channels) when the cache is missing or stale,
+    // e.g. a channel opened from Channels/category browse that was never a
+    // favorite. VOD movies and series episodes show their own synopsis via
     // loadDescription instead (there's no EPG for on-demand content).
     LaunchedEffect(contentId, isLive) {
         if (isLive) {
             val (current, next) = try {
-                api.getCurrentAndNextProgram(contentId)
+                val (cachedPrograms, stale) = withContext(Dispatchers.IO) {
+                    channelDb.getCachedEpgWindow(contentId) to
+                        channelDb.isEpgWindowStale(contentId, 24 * 60 * 60 * 1000L)
+                }
+                val programs = if (cachedPrograms.isNotEmpty() && !stale) {
+                    cachedPrograms
+                } else {
+                    val fetched = api.fetchEpgWindow(contentId)
+                    if (fetched.isNotEmpty()) {
+                        withContext(Dispatchers.IO) { channelDb.setEpgWindow(contentId, fetched) }
+                    }
+                    fetched.ifEmpty { cachedPrograms }
+                }
+                XtreamApi.currentAndNextFrom(programs)
             } catch (e: Exception) {
                 null to null
             }
@@ -381,7 +458,7 @@ fun PlayerScreen(
                     longPressJob = coroutineScope.launch {
                         delay(500)
                         longPressFired = true
-                        if (isLive) {
+                        if (isLive && recordingEnabled) {
                             // Stopping is unambiguous - do it immediately.
                             // Starting asks how long to record first (see
                             // RecordingDurationMenu) rather than starting an
@@ -473,7 +550,7 @@ fun PlayerScreen(
             // long-press-to-stop logic above is unchanged, only the visual
             // layer differs.
             RecordingLockoutScreen(
-                channelTitle = displayTitle.ifBlank { title },
+                channelTitle = TitleFormat.clean(displayTitle.ifBlank { title }),
                 elapsedSeconds = recordingElapsedSeconds,
                 capMinutes = recordingDurationMinutes,
                 recordedBytes = recordedBytes
@@ -515,8 +592,8 @@ fun PlayerScreen(
 
             if (showInfo && seekFeedbackAtMs == null) {
                 PlayerInfoOverlay(
-                    channelName = title,
-                    programTitle = displayTitle,
+                    channelName = TitleFormat.clean(title),
+                    programTitle = TitleFormat.clean(displayTitle),
                     description = description,
                     rating = rating,
                     iconUrl = iconUrl,
@@ -524,7 +601,8 @@ fun PlayerScreen(
                     isLive = isLive,
                     nowProgram = nowProgram,
                     nextProgram = nextProgram,
-                    nowEpochSeconds = nowEpochSeconds
+                    nowEpochSeconds = nowEpochSeconds,
+                    recordingEnabled = recordingEnabled
                 )
 
                 Box(
@@ -597,7 +675,8 @@ private fun PlayerInfoOverlay(
     isLive: Boolean,
     nowProgram: EpgProgram?,
     nextProgram: EpgProgram?,
-    nowEpochSeconds: Long
+    nowEpochSeconds: Long,
+    recordingEnabled: Boolean
 ) {
     val appColors = LocalAppColors.current
     val textShadow = Shadow(color = Color.Black.copy(alpha = 0.8f), blurRadius = 12f)
@@ -831,7 +910,7 @@ private fun PlayerInfoOverlay(
                         )
                         if (nextProgram != null) {
                             Text(
-                                text = "${formatTime(nextProgram.startEpochSeconds)}–${formatTime(nextProgram.stopEpochSeconds)}  ${nextProgram.title}",
+                                text = "${formatTime(nextProgram.startEpochSeconds)}–${formatTime(nextProgram.stopEpochSeconds)}  ${TitleFormat.clean(nextProgram.title)}",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodyMedium
                             )
@@ -839,7 +918,7 @@ private fun PlayerInfoOverlay(
                     }
                 }
 
-                Row(
+                if (recordingEnabled) Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 20.dp),

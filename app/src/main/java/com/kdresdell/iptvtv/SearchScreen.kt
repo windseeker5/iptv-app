@@ -351,7 +351,7 @@ fun SearchScreen(
                                 isFavorite = isFavorite(result.channel.streamId),
                                 onPlay = { onPlayLive(result.channel) },
                                 onToggleFavorite = { onToggleFavorite(result.channel) },
-                                subtitle = nowPlaying[result.channel.streamId]?.let { "Now: ${it.title}" },
+                                subtitle = nowPlaying[result.channel.streamId]?.let { "Now: ${TitleFormat.clean(it.title)}" },
                                 isDefault = defaultStreamId == result.channel.streamId,
                                 onSetDefault = { onSetDefault(result.channel) },
                                 playCardModifier = firstItemModifier,

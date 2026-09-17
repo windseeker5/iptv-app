@@ -12,6 +12,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.kdresdell.iptvtv.theme.IptvTvTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -73,7 +76,7 @@ private data class PlayerParams(
     val loadDetails: suspend () -> ContentDetails
 )
 
-private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (this) {
+private fun PlayableItem.toPlayerParams(api: XtreamApi, channelDb: LiveChannelDatabase): PlayerParams = when (this) {
     is PlayableItem.Live -> PlayerParams(
         title = channel.name,
         iconUrl = channel.streamIcon,
@@ -91,7 +94,13 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi): PlayerParams = when (th
         isLive = false,
         subtitle = null,
         loadDetails = {
-            val details = api.getVodDetails(movie.streamId)
+            // Cached on-demand: fetched once, instant on every later open -
+            // confirmed on real hardware (2026-09-17) reopening the same
+            // movie no longer re-hits the network.
+            val cached = withContext(Dispatchers.IO) { channelDb.getCachedVodDetails(movie.streamId) }
+            val details = cached ?: api.getVodDetails(movie.streamId).also {
+                withContext(Dispatchers.IO) { channelDb.setVodDetails(movie.streamId, it) }
+            }
             ContentDetails(details.description.ifBlank { null }, details.rating.ifBlank { null })
         }
     )
@@ -214,38 +223,47 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 epgWindows = cached
-                // Programs change every 30-60min, so this cache is refreshed
-                // far more often than the single-program "Now:" subtitle
-                // cache elsewhere (channel_epg, isEpgStale/24h) - one
-                // get_short_epg call per stale favorite, never the whole
-                // provider catalog.
-                //
-                // Looping with a delay (rather than a one-shot check keyed
-                // only on `favorites`) matters: get_short_epg returns a fixed
-                // number of upcoming programs, not a rolling window, so real
-                // time keeps advancing past it while the app just sits on My
-                // TV - without this loop the guide silently runs out of
-                // program data and the timeline goes blank past whatever was
-                // fetched when the screen/app was last (re)opened.
-                val maxAgeMillis = 30 * 60 * 1000L
+                // fetchEpgWindow (get_simple_data_table) returns ~1 week of
+                // programs per channel, not a short rolling window like the
+                // old get_short_epg-based call did - so one fetch per
+                // channel per day is enough to keep now/next accurate,
+                // versus the 30min cadence this used to need. Looping with a
+                // delay (rather than a one-shot check keyed only on
+                // `favorites`) still matters: real time keeps advancing past
+                // whatever was fetched, so the loop has to periodically
+                // refresh even if `favorites` itself never changes.
+                val maxAgeMillis = 24 * 60 * 60 * 1000L
                 while (true) {
-                    favorites.forEach { channel ->
-                        val stale = withContext(Dispatchers.IO) {
-                            channelDb.isEpgWindowStale(channel.streamId, maxAgeMillis)
-                        }
-                        if (stale) {
-                            val programs = try {
-                                epgApi.getEpgWindow(channel.streamId)
-                            } catch (e: Exception) {
-                                emptyList()
-                            }
-                            if (programs.isNotEmpty()) {
-                                withContext(Dispatchers.IO) {
-                                    channelDb.setEpgWindow(channel.streamId, programs)
+                    // Fetched concurrently, not one-at-a-time - confirmed on
+                    // real hardware (2026-09-17) that a sequential
+                    // favorites.forEach here was the actual cause of both the
+                    // slow guide load and the "only one row highlighted" bug:
+                    // with 15-20 favorites, rows whose turn hadn't come up
+                    // yet just sat on the empty "No information" placeholder
+                    // for tens of seconds. Each channel's try/catch stays
+                    // inside its own async{} so one failing fetch can't
+                    // cancel the others.
+                    coroutineScope {
+                        favorites.map { channel ->
+                            async {
+                                val stale = withContext(Dispatchers.IO) {
+                                    channelDb.isEpgWindowStale(channel.streamId, maxAgeMillis)
                                 }
-                                epgWindows = epgWindows + (channel.streamId to programs)
+                                if (stale) {
+                                    val programs = try {
+                                        epgApi.fetchEpgWindow(channel.streamId)
+                                    } catch (e: Exception) {
+                                        emptyList()
+                                    }
+                                    if (programs.isNotEmpty()) {
+                                        withContext(Dispatchers.IO) {
+                                            channelDb.setEpgWindow(channel.streamId, programs)
+                                        }
+                                        epgWindows = epgWindows + (channel.streamId to programs)
+                                    }
+                                }
                             }
-                        }
+                        }.awaitAll()
                     }
                     delay(maxAgeMillis)
                 }
@@ -392,6 +410,16 @@ class MainActivity : ComponentActivity() {
                             syncedVodCount = channelDb.countVodStreams()
                             syncedSeriesCount = channelDb.countSeries()
                             LoadState.Success(Unit)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            // Normal path when the user leaves Search before
+                            // the sync finishes - confirmed on real hardware
+                            // (2026-09-17) this was getting caught below and
+                            // logged as a scary "Catalog sync failed" for
+                            // completely ordinary navigation, same class of
+                            // bug as PlayerScreen's recording coroutine (see
+                            // startRecording). Rethrown instead so it just
+                            // completes the coroutine like any cancellation.
+                            throw e
                         } catch (e: Exception) {
                             AppLog.log("Catalog sync failed: ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
@@ -441,9 +469,16 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.MyVod -> {
-                    var recordings by remember { mutableStateOf(RecordingStorage.listRecordings(context)) }
+                    // Recordings only ever show here when the Settings
+                    // toggle is on (see RecordingPrefs) - listRecordings
+                    // already returns empty with no drive attached, so
+                    // together this matches todo.md's "enabled AND a USB
+                    // drive is attached" requirement without a separate flag.
+                    fun loadVisibleRecordings() =
+                        if (RecordingPrefs.isEnabled(context)) RecordingStorage.listRecordings(context) else emptyList()
+                    var recordings by remember { mutableStateOf(loadVisibleRecordings()) }
                     LaunchedEffect(currentScreen) {
-                        recordings = RecordingStorage.listRecordings(context)
+                        recordings = loadVisibleRecordings()
                     }
                     WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
                         MyVodScreen(
@@ -461,7 +496,7 @@ class MainActivity : ComponentActivity() {
                             onRemoveSeries = toggleSeriesSaved,
                             onDeleteRecording = { file ->
                                 RecordingStorage.deleteRecording(file)
-                                recordings = RecordingStorage.listRecordings(context)
+                                recordings = loadVisibleRecordings()
                             }
                         )
                     }
@@ -474,7 +509,18 @@ class MainActivity : ComponentActivity() {
                     }
                     LaunchedEffect(currentScreen.series) {
                         episodesState = try {
-                            LoadState.Success(api.getSeriesEpisodes(currentScreen.series.seriesId))
+                            // Cached on-demand, same as VOD details above -
+                            // reopening the same series' episode list is
+                            // instant after the first fetch.
+                            val cached = withContext(Dispatchers.IO) {
+                                channelDb.getCachedSeriesDetails(currentScreen.series.seriesId)
+                            }
+                            val details = cached ?: api.getSeriesEpisodes(currentScreen.series.seriesId).also {
+                                withContext(Dispatchers.IO) {
+                                    channelDb.setSeriesDetails(currentScreen.series.seriesId, it)
+                                }
+                            }
+                            LoadState.Success(details)
                         } catch (e: Exception) {
                             AppLog.log("Load episodes failed (${currentScreen.series.name}): ${e.javaClass.simpleName}: ${e.message}")
                             LoadState.Error(e.message ?: "Unknown error")
@@ -509,7 +555,7 @@ class MainActivity : ComponentActivity() {
                     // rely on it (same reason WithRail's Back handling in
                     // SideRail.kt uses raw onKeyEvent too).
                     val item = currentScreen.item
-                    val params = remember(item) { item.toPlayerParams(api) }
+                    val params = remember(item) { item.toPlayerParams(api, channelDb) }
                     // Up/down channel-cycling always cycles through favorites
                     // specifically (not whatever list you arrived from), per
                     // the user's request - a no-op if the current channel
@@ -525,6 +571,7 @@ class MainActivity : ComponentActivity() {
                         contentId = params.contentId,
                         isLive = params.isLive,
                         api = api,
+                        channelDb = channelDb,
                         subtitle = params.subtitle,
                         loadDetails = params.loadDetails,
                         onSelectRail = onSelectRail,

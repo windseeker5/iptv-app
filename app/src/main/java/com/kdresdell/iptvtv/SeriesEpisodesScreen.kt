@@ -159,7 +159,7 @@ private fun SeriesHeader(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
             // Reduced from headlineLarge (44sp) - a series name read as too
             // dominant at that size once real synopsis text sat next to it.
-            Text(text = name, style = MaterialTheme.typography.headlineSmall, color = headingColor)
+            Text(text = TitleFormat.clean(name), style = MaterialTheme.typography.headlineSmall, color = headingColor)
             // Provider-supplied rating, never fabricated - blank whenever
             // the provider doesn't return one.
             if (rating.isNotBlank()) {
@@ -194,7 +194,7 @@ private fun EpisodeRow(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
             Text(
-                text = "E${episode.episodeNum}" + if (episode.title.isNotBlank()) " · ${episode.title}" else "",
+                text = "E${episode.episodeNum}" + if (episode.title.isNotBlank()) " · ${TitleFormat.clean(episode.title)}" else "",
                 style = MaterialTheme.typography.labelMedium,
                 color = onSurface,
                 maxLines = 2,

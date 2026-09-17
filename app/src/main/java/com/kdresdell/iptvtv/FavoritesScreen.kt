@@ -295,7 +295,7 @@ private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, streamU
         if (channel != null) {
             Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
                 Text(
-                    text = program?.title ?: channel.name,
+                    text = TitleFormat.clean(program?.title ?: channel.name),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -478,7 +478,7 @@ private fun EpgChannelRow(
                         modifier = Modifier.size(24.dp).clip(RoundedCornerShape(5.dp))
                     )
                     Text(
-                        text = channel.name,
+                        text = TitleFormat.clean(channel.name),
                         color = nameColor,
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
@@ -551,7 +551,7 @@ private fun EpgChannelRow(
                                         }
                                 ) {
                                     Text(
-                                        text = program.title,
+                                        text = TitleFormat.clean(program.title),
                                         color = if (isCurrent) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.labelSmall,
                                         maxLines = 1,

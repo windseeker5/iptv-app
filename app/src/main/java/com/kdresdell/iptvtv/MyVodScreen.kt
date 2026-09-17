@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -70,13 +71,12 @@ fun MyVodScreen(
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(28.dp),
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 48.dp, vertical = 24.dp)
+            contentPadding = PaddingValues(horizontal = 48.dp, vertical = 24.dp),
+            modifier = Modifier.fillMaxSize()
         ) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(text = "My Librairie", style = MaterialTheme.typography.headlineLarge, color = onBackground, modifier = Modifier.alignByBaseline())
+                    Text(text = "My Librairie", style = libraryTitleStyle(), color = onBackground, modifier = Modifier.alignByBaseline())
                     Text(text = "$totalCount titles", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
                 }
             }
@@ -90,7 +90,7 @@ fun MyVodScreen(
                     ) {
                         savedMovies.forEachIndexed { index, movie ->
                             PosterCard(
-                                title = movie.name,
+                                title = TitleFormat.clean(movie.name),
                                 cover = movie.streamIcon,
                                 isSaved = true,
                                 onOpen = { onPlayMovie(movie) },
@@ -111,7 +111,7 @@ fun MyVodScreen(
                     ) {
                         savedSeries.forEachIndexed { index, series ->
                             PosterCard(
-                                title = series.name,
+                                title = TitleFormat.clean(series.name),
                                 cover = series.cover,
                                 isSaved = true,
                                 onOpen = { onOpenEpisodes(series) },
@@ -130,7 +130,7 @@ fun MyVodScreen(
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(text = "Recordings", style = MaterialTheme.typography.headlineSmall, color = onBackground, modifier = Modifier.alignByBaseline())
+                            Text(text = "Recordings", style = librarySectionHeaderStyle(), color = onBackground, modifier = Modifier.alignByBaseline())
                             Text(text = "${recordings.size}", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -154,8 +154,8 @@ fun MyVodScreen(
     }
 }
 
-// §6.6 - poster-grid section: Headline Small header + count, then a
-// wrapping 5-card (124dp) grid that grows downward as the library grows.
+// §6.6 - poster-grid section: header + count, then a wrapping 5-card grid
+// that grows downward as the library grows.
 @Composable
 private fun PosterSection(
     title: String,
@@ -166,7 +166,7 @@ private fun PosterSection(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = title, style = MaterialTheme.typography.headlineSmall, color = headingColor, modifier = Modifier.alignByBaseline())
+            Text(text = title, style = librarySectionHeaderStyle(), color = headingColor, modifier = Modifier.alignByBaseline())
             Text(text = "$count", style = MaterialTheme.typography.labelMedium, color = countColor, modifier = Modifier.alignByBaseline())
         }
         FlowRow(
@@ -177,4 +177,19 @@ private fun PosterSection(
             content()
         }
     }
+}
+
+// Explicit user request (2026-09-17): the screen title and section headers
+// read too large, and the oversized headers combined with no bottom scroll
+// room meant the last poster row's bottom edge got clipped with no way to
+// scroll further to see it. Trimming these (and PosterCardWidth below, and
+// the contentPadding fix above) address both the cosmetic and scroll bugs.
+@Composable
+private fun libraryTitleStyle() = MaterialTheme.typography.headlineLarge.let {
+    it.copy(fontSize = it.fontSize * 0.75f, lineHeight = it.lineHeight * 0.75f)
+}
+
+@Composable
+private fun librarySectionHeaderStyle() = MaterialTheme.typography.headlineSmall.let {
+    it.copy(fontSize = it.fontSize * 0.85f, lineHeight = it.lineHeight * 0.85f)
 }

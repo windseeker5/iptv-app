@@ -47,7 +47,11 @@ import java.util.Locale
 // Librairie (VodTiles.kt/MyVodScreen.kt/SeriesEpisodesScreen.kt). Unlike
 // VodRow/SeriesRow below (full-width list rows, no scale on focus), this is
 // a real grid card - standard appCardScale() applies.
-val PosterCardWidth = 124.dp
+// -10% from the original 124dp - explicit user request (2026-09-17), part
+// of fixing My Librairie's poster grid being cut off at the bottom with no
+// way to scroll further (see MyVodScreen's contentPadding fix for the rest
+// of that).
+val PosterCardWidth = 112.dp
 
 // One focusable poster: art fills the card, title sits on a bottom scrim
 // (per the approved mockup) rather than a flat surface with side-by-side
@@ -165,7 +169,7 @@ fun VodRow(
                 if (isSaved) {
                     Text(text = "★", color = Color(0xFFA6F2A6))
                 }
-                Text(text = movie.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                Text(text = TitleFormat.clean(movie.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
             }
             typeBadge?.invoke()
         }
@@ -210,7 +214,7 @@ fun SeriesRow(
                 if (isSaved) {
                     Text(text = "★", color = Color(0xFFA6F2A6))
                 }
-                Text(text = series.name, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                Text(text = TitleFormat.clean(series.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
             }
             typeBadge?.invoke()
         }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -34,6 +36,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.SoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
@@ -43,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Switch
+import androidx.tv.material3.SwitchDefaults
 import androidx.tv.material3.Text
 import com.kdresdell.iptvtv.theme.FocusDefaults
 import com.kdresdell.iptvtv.theme.LocalAppColors
@@ -143,13 +148,30 @@ private fun SettingsField(
 private fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Card silently swallows DirectionDown itself on this hardware (same
+    // class of bug as BasicTextField's - see SettingsField.onDirectionDown)
+    // - confirmed on real device: plain Down from this button did not move
+    // focus to the next item below at all, despite it being visible on
+    // screen. onPreviewKeyEvent runs ahead of Card's own key handling, same
+    // fix pattern as the text fields above.
+    onDirectionDown: (() -> Boolean)? = null
 ) {
     val pillShape = RoundedCornerShape(50)
     val accent = LocalAppColors.current.vividAccent
     Card(
         onClick = onClick,
-        modifier = modifier,
+        modifier = if (onDirectionDown != null) {
+            modifier.onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    onDirectionDown()
+                } else {
+                    false
+                }
+            }
+        } else {
+            modifier
+        },
         shape = CardDefaults.shape(pillShape),
         scale = appCardScale(),
         colors = CardDefaults.colors(
@@ -168,6 +190,70 @@ private fun PrimaryActionButton(
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp)
         )
+    }
+}
+
+// On/off row for the Recording section - a Card rather than a native
+// Switch - a real tv.material3.Switch thumb/track, not a recolored Card.
+// Explicit user request (2026-09-17): the card flipping its whole
+// background between accent-green and neutral on toggle read as unclear -
+// a switch makes on/off legible from the thumb position and track color
+// alone, while the row itself stays the same neutral surface always.
+@Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    // See PrimaryActionButton.onDirectionDown - same real-device bug.
+    onDirectionDown: (() -> Boolean)? = null
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val accent = LocalAppColors.current.vividAccent
+    val appColors = LocalAppColors.current
+    Card(
+        onClick = onToggle,
+        modifier = (if (onDirectionDown != null) {
+            modifier.onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    onDirectionDown()
+                } else {
+                    false
+                }
+            }
+        } else {
+            modifier
+        }).fillMaxWidth(),
+        shape = CardDefaults.shape(shape),
+        scale = appCardScale(),
+        colors = CardDefaults.colors(
+            containerColor = appColors.surfaceContainer,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            focusedContainerColor = appColors.surfaceContainerHigh,
+            focusedContentColor = MaterialTheme.colorScheme.onSurface
+        ),
+        border = appCardBorder(shape = shape),
+        glow = appCardGlow()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = label, style = MaterialTheme.typography.bodyLarge)
+            Switch(
+                checked = checked,
+                onCheckedChange = null,
+                colors = SwitchDefaults.colors(
+                    checkedTrackColor = accent,
+                    checkedThumbColor = Color.Black,
+                    uncheckedTrackColor = appColors.surfaceContainerHighest,
+                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            )
+        }
     }
 }
 
@@ -244,12 +330,31 @@ fun SettingsScreen(
     var username by remember { mutableStateOf(initial.username) }
     var password by remember { mutableStateOf(initial.password) }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+    var recordingEnabled by remember { mutableStateOf(RecordingPrefs.isEnabled(context)) }
+    var driveCheckMessage by remember { mutableStateOf<String?>(null) }
+
+    // The toggle is a saved preference, not a live sensor - it doesn't know
+    // on its own that a drive was unplugged since the last time someone
+    // touched it. Confirmed as a real bug on real hardware (2026-09-17):
+    // pulling the drive left this screen still showing "On" until the user
+    // noticed and toggled it off themselves. Re-checking here, once per
+    // visit to this screen, means the worst case is a stale "On" for the
+    // time between visits, not indefinitely.
+    LaunchedEffect(Unit) {
+        if (recordingEnabled && !RecordingStorage.isDriveAvailable(context)) {
+            RecordingPrefs.setEnabled(context, false)
+            recordingEnabled = false
+            driveCheckMessage = "Recording was turned off - the USB drive is no longer connected."
+        }
+    }
 
     val updateFocus = remember { FocusRequester() }
     val serverUrlFocus = remember { FocusRequester() }
     val usernameFocus = remember { FocusRequester() }
     val passwordFocus = remember { FocusRequester() }
     val saveFocus = remember { FocusRequester() }
+    val recordingToggleFocus = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -340,11 +445,83 @@ fun SettingsScreen(
             PrimaryActionButton(
                 text = "Save",
                 onClick = { onSave(ProviderCredentials(serverUrl.trim(), username.trim(), password)) },
-                modifier = Modifier.focusRequester(saveFocus)
+                modifier = Modifier.focusRequester(saveFocus),
+                onDirectionDown = {
+                    recordingToggleFocus.requestFocus()
+                    true
+                }
             )
         }
 
-        // 2. App Update - moved below Provider Setup (was above it) and,
+        // 2. Recording - off by default (see RecordingPrefs); most Google TV
+        // boxes have no storage attached for it, so this stays an explicit
+        // opt-in rather than something that silently fails for everyone
+        // without a drive. Enabling it re-checks for a writable drive every
+        // time (RecordingStorage.isDriveAvailable) rather than trusting a
+        // stale toggle - a drive that was there yesterday may not be today.
+        item { SectionDivider() }
+        item {
+            Text(text = "Recording", style = sectionHeaderStyle(), color = MaterialTheme.colorScheme.onSurface)
+        }
+        item {
+            ToggleRow(
+                label = "Enable recording",
+                checked = recordingEnabled,
+                onToggle = {
+                    if (recordingEnabled) {
+                        RecordingPrefs.setEnabled(context, false)
+                        recordingEnabled = false
+                        driveCheckMessage = null
+                    } else if (RecordingStorage.isDriveAvailable(context)) {
+                        RecordingPrefs.setEnabled(context, true)
+                        recordingEnabled = true
+                        driveCheckMessage = null
+                    } else {
+                        driveCheckMessage = "No writable USB drive found - see the setup steps below, then try again."
+                    }
+                },
+                modifier = Modifier.focusRequester(recordingToggleFocus)
+            )
+        }
+        if (driveCheckMessage != null) {
+            item {
+                Text(
+                    text = driveCheckMessage.orEmpty(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        // Setup steps only matter before enabling - once recording is
+        // actually on and working, they're just clutter. Explicit user
+        // request (2026-09-17).
+        if (!recordingEnabled) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(LocalAppColors.current.surfaceContainer, RoundedCornerShape(8.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.border, RoundedCornerShape(8.dp))
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Setup",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "1. Connect a USB SSD or flash drive to your TV or streaming box.\n" +
+                            "2. If it's an SSD, plug it into a powered USB-C hub, not directly into the TV - most TVs' own USB ports can't supply enough power to keep an SSD running.\n" +
+                            "3. Turn on Enable recording above. Recording (long-press OK on a live channel, and the Recordings section in My Librairie) only appears once a drive is confirmed.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // 3. App Update - moved below Provider Setup (was above it) and,
         // like the error log below, only rendered at all when there's
         // something to act on: no more permanent "Up to date" status line
         // cluttering the screen when there's nothing to do. Reachable the
@@ -391,7 +568,7 @@ fun SettingsScreen(
             }
         }
 
-        // 3. Error log (prototype-stage debugging - no adb/logcat access for
+        // 4. Error log (prototype-stage debugging - no adb/logcat access for
         // the people actually testing this on real TVs). Section - divider,
         // header, and all - only exists when there's actually something to
         // show: an empty "Error Log / No errors logged" state had nothing
