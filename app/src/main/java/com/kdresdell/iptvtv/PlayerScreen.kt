@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,7 +98,17 @@ fun PlayerScreen(
     subtitle: String? = null,
     loadDetails: suspend () -> ContentDetails = { ContentDetails() },
     onSelectRail: (RailItem) -> Unit,
-    onChannelChange: (direction: Int) -> Unit = {}
+    onChannelChange: (direction: Int) -> Unit = {},
+    // Non-null only for live playback - the single ExoPlayer instance shared
+    // with the reduced/embedded guide view (FavoritesScreen's
+    // GuideMode.Embedded), so Back/OK toggling between full-screen and
+    // reduced never reloads the stream. VOD/episode/recording keep their own
+    // throwaway player below, unaffected.
+    livePlaybackHolder: LivePlaybackHolder? = null,
+    // Live-only: Back reduces to the embedded guide instead of opening the
+    // in-player rail (see the Key.Back branch below). VOD/episode keep
+    // opening the rail via openMenu(), unchanged.
+    onReduceToGuide: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // Recording is opt-in (see RecordingPrefs/SettingsScreen) - off by
@@ -115,21 +126,39 @@ fun PlayerScreen(
     // just stayed black forever with the paused icon frozen on top, giving
     // no sign of whether the app, the content, or the network was at fault.
     var playbackError by remember(contentId) { mutableStateOf<String?>(null) }
-    val exoPlayer = remember(streamUrl) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(streamUrl))
-            addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    playbackError = error.message ?: "Playback error"
+    // key() (not a plain if/else around remember/DisposableEffect) so that
+    // if isLive/livePlaybackHolder ever differ between two calls at this
+    // same composable slot (e.g. switching straight from a live channel to
+    // a VOD title), Compose discards the old branch's remembered state
+    // cleanly instead of misaligning its slot table.
+    val exoPlayer = key(isLive, livePlaybackHolder != null) {
+        if (isLive && livePlaybackHolder != null) {
+            DisposableEffect(livePlaybackHolder) {
+                livePlaybackHolder.onError = { message -> playbackError = message }
+                onDispose { livePlaybackHolder.onError = null }
+            }
+            LaunchedEffect(contentId, streamUrl) {
+                livePlaybackHolder.tune(contentId, streamUrl)
+            }
+            livePlaybackHolder.player
+        } else {
+            val player = remember(streamUrl) {
+                ExoPlayer.Builder(context).build().apply {
+                    setMediaItem(MediaItem.fromUri(streamUrl))
+                    addListener(object : Player.Listener {
+                        override fun onPlayerError(error: PlaybackException) {
+                            playbackError = error.message ?: "Playback error"
+                        }
+                    })
+                    prepare()
+                    playWhenReady = true
                 }
-            })
-            prepare()
-            playWhenReady = true
+            }
+            DisposableEffect(player) {
+                onDispose { player.release() }
+            }
+            player
         }
-    }
-
-    DisposableEffect(exoPlayer) {
-        onDispose { exoPlayer.release() }
     }
 
     // Google TV's screensaver/sleep timer has no idea video is playing here
@@ -421,19 +450,21 @@ fun PlayerScreen(
         menuOpen = true
     }
 
-    // Back opens/closes the in-player rail (replacing DirectionLeft's old
-    // role - Left/Right are freed up for VOD seek, see the onKeyEvent block
-    // below). Handled directly in onKeyEvent below rather than via
-    // BackHandler/the system back dispatcher - confirmed on real hardware
-    // (Chromecast with Google TV) that the dispatcher silently drops every
-    // other Back invocation on this device (predictive-back quirk), while
-    // the raw KeyEvent for Back reliably reaches onKeyEvent on every single
-    // press. Never falls through to leave the player on its own - an
-    // earlier version tried a timing window to let a quick second Back
-    // "really" leave, but that made Back unpredictably dump straight out to
-    // the (slow-loading) guide during ordinary open/close fumbling. Leaving
-    // the player now only happens by picking a destination from the opened
-    // rail (onSelectRail below) - deterministic, no accidental exits.
+    // Back opens/closes the in-player rail for VOD/episode (replacing
+    // DirectionLeft's old role - Left/Right are freed up for VOD seek, see
+    // the onKeyEvent block below); for live it instead reduces to the
+    // embedded guide (onReduceToGuide) - see that param's doc above. Handled
+    // directly in onKeyEvent below rather than via BackHandler/the system
+    // back dispatcher - confirmed on real hardware (Chromecast with Google
+    // TV) that the dispatcher silently drops every other Back invocation on
+    // this device (predictive-back quirk), while the raw KeyEvent for Back
+    // reliably reaches onKeyEvent on every single press. VOD/episode never
+    // falls through to leave the player on its own - an earlier version
+    // tried a timing window to let a quick second Back "really" leave, but
+    // that made Back unpredictably dump straight out to the (slow-loading)
+    // guide during ordinary open/close fumbling. Leaving the player there
+    // only happens by picking a destination from the opened rail
+    // (onSelectRail below) - deterministic, no accidental exits.
 
     Box(
         modifier = Modifier
@@ -517,7 +548,12 @@ fun PlayerScreen(
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.key) {
                     Key.Back -> {
-                        openMenu()
+                        // Live: Back reduces to the embedded guide instead of
+                        // opening the in-player rail (see onReduceToGuide
+                        // doc above) - VOD/episode keep opening the rail,
+                        // since the reduce-to-EPG concept doesn't apply to
+                        // on-demand content.
+                        if (isLive && livePlaybackHolder != null) onReduceToGuide() else openMenu()
                         true
                     }
                     Key.DirectionUp -> {
@@ -531,10 +567,10 @@ fun PlayerScreen(
                     }
                     Key.DirectionLeft -> {
                         // VOD/series: seek. Live has nothing to rewind/fast
-                        // forward, so Left falls back to the same "open
-                        // menu" action as Back there instead of doing
-                        // nothing (Up/Down still cycles channels either way).
-                        if (!isLive) { seekBy(-1, event.nativeKeyEvent.repeatCount); true } else { openMenu(); true }
+                        // forward, and only Back should do anything in
+                        // full-screen live (per the nav spec) - a true no-op
+                        // here now, not a fallback to open the menu.
+                        if (!isLive) { seekBy(-1, event.nativeKeyEvent.repeatCount); true } else false
                     }
                     Key.DirectionRight -> {
                         if (!isLive) { seekBy(1, event.nativeKeyEvent.repeatCount); true } else false

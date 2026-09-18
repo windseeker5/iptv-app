@@ -248,6 +248,16 @@ fun WithRail(
     selected: RailItem?,
     onSelectRail: (RailItem) -> Unit,
     hasSettingsAlert: Boolean = false,
+    // Back while the rail itself has focus is the app's one, uniform exit
+    // gesture everywhere outside the player (see [[navigation_model_spec]]).
+    // Previously this was left unconsumed to fall through to the OS's
+    // undocumented default back action, which is exactly why exiting left
+    // audio playing on Fire TV: an Activity that's only backgrounded (not
+    // destroyed) never runs Compose's DisposableEffect release() calls.
+    // Calling this explicitly instead makes exit deterministic on every
+    // device - the caller is expected to release any live playback and then
+    // actually finish() the Activity.
+    onExitApp: () -> Unit,
     content: @Composable () -> Unit
 ) {
     var railFocused by remember { mutableStateOf(false) }
@@ -312,18 +322,23 @@ fun WithRail(
                 .offset(x = railOffset)
                 .onFocusChanged { railFocused = it.hasFocus }
                 .onKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
-                        contentFocusRequester.requestFocus()
-                        true
-                    } else {
-                        // Back while the menu itself has focus is deliberately
-                        // left unconsumed here (see [[navigation_model_spec]]
-                        // memory) - with no BackHandler registered anywhere
-                        // to intercept it, this falls through to Android's
-                        // default back action and exits/backgrounds the app.
-                        // That is the *only* way to exit: Back opens the menu
-                        // (above), Back again while it's focused exits.
-                        false
+                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    when (event.key) {
+                        Key.DirectionRight -> {
+                            contentFocusRequester.requestFocus()
+                            true
+                        }
+                        // Back while the menu itself has focus is the app's
+                        // only exit gesture: Back opens the menu (above),
+                        // Back again while it's focused exits - now via an
+                        // explicit onExitApp() call instead of falling
+                        // through to the OS default (see the param doc above
+                        // for why that mattered).
+                        Key.Back -> {
+                            onExitApp()
+                            true
+                        }
+                        else -> false
                     }
                 }
         ) {

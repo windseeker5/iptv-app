@@ -1,5 +1,6 @@
 package com.kdresdell.iptvtv
 
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,6 +24,13 @@ import kotlinx.coroutines.withContext
 // persistent side rail (see SideRail.kt) is how you reach the others - it
 // is not itself part of this back-stack, it just changes which Screen is
 // current, same as selecting a rail item.
+// Fullscreen is today's full-screen player. ReducedWithGuide is the new
+// Back-from-live destination: the same shared live player, shrunk and
+// embedded over the "My TV" EPG guide (FavoritesScreen's GuideMode.Embedded)
+// - see [[navigation_model_spec]] for the full Back chain this implements.
+// Only ever set for live items; VOD/episode/recording always stay Fullscreen.
+private enum class PlayerViewMode { Fullscreen, ReducedWithGuide }
+
 private sealed class Screen {
     data object Settings : Screen()
     data object Help : Screen()
@@ -36,7 +44,11 @@ private sealed class Screen {
     // instead of three separate ones - that's what lets the in-player
     // browse overlay switch what's playing without tearing down and
     // rebuilding the whole player (same `when` branch, same call site).
-    data class NowPlaying(val item: PlayableItem, val returnTo: Screen) : Screen()
+    data class NowPlaying(
+        val item: PlayableItem,
+        val returnTo: Screen,
+        val viewMode: PlayerViewMode = PlayerViewMode.Fullscreen
+    ) : Screen()
 }
 
 private fun Screen.toRailItem(): RailItem? = when (this) {
@@ -132,6 +144,22 @@ class MainActivity : ComponentActivity() {
         setContent {
           IptvTvTheme {
             val context = LocalContext.current
+            val activity = context as Activity
+            // Single ExoPlayer for live playback, shared between full-screen
+            // and the reduced/embedded guide view - see LivePlaybackHolder's
+            // doc for why (continuous playback across Back/OK, and a
+            // deterministic release() point for the exit-audio fix below).
+            val livePlaybackHolder = remember { LivePlaybackHolder(context) }
+            // The app's one, uniform exit gesture (Back while the side rail
+            // is focused, from any screen - see WithRail in SideRail.kt).
+            // Explicitly releasing the shared player before finishing is
+            // what fixes the Fire TV bug where audio kept playing after
+            // exit: it no longer depends on whatever the OS's default back
+            // behavior happens to be on a given device.
+            val onExitApp: () -> Unit = {
+                livePlaybackHolder.release()
+                activity.finishAndRemoveTask()
+            }
             val prefs = remember { ProviderPrefs(context) }
             val favoritesStore = remember { FavoritesStore(context) }
             val channelDb = remember { LiveChannelDatabase(context) }
@@ -285,7 +313,7 @@ class MainActivity : ComponentActivity() {
                             onUpdateClick = onUpdateClick
                         )
                     } else {
-                        WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                        WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                             SettingsScreen(
                                 initial = credentials,
                                 onSave = { saved ->
@@ -301,13 +329,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.Help -> {
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         HelpScreen()
                     }
                 }
 
                 is Screen.Favorites -> {
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         FavoritesScreen(
                             favorites = favorites,
                             epgWindows = epgWindows,
@@ -335,7 +363,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         CategoryListScreen(
                             state = categoriesState,
                             onSelectCategory = { category -> screen = Screen.Channels(category) }
@@ -356,7 +384,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         ChannelListScreen(
                             categoryName = currentScreen.category.categoryName,
                             state = channelsState,
@@ -425,7 +453,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         SearchScreen(
                             query = searchQuery,
                             onQueryChange = { searchQuery = it },
@@ -480,7 +508,7 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(currentScreen) {
                         recordings = loadVisibleRecordings()
                     }
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         MyVodScreen(
                             savedMovies = savedMovies,
                             savedSeries = savedSeries,
@@ -526,7 +554,7 @@ class MainActivity : ComponentActivity() {
                             LoadState.Error(e.message ?: "Unknown error")
                         }
                     }
-                    WithRail(selected = null, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null) {
+                    WithRail(selected = null, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
                         SeriesEpisodesScreen(
                             seriesName = currentScreen.series.name,
                             seriesCover = currentScreen.series.cover,
@@ -564,27 +592,68 @@ class MainActivity : ComponentActivity() {
                     val favoriteIndex = (item as? PlayableItem.Live)?.let { live ->
                         favorites.indexOfFirst { it.streamId == live.channel.streamId }
                     } ?: -1
-                    PlayerScreen(
-                        title = params.title,
-                        iconUrl = params.iconUrl,
-                        streamUrl = params.streamUrl,
-                        contentId = params.contentId,
-                        isLive = params.isLive,
-                        api = api,
-                        channelDb = channelDb,
-                        subtitle = params.subtitle,
-                        loadDetails = params.loadDetails,
-                        onSelectRail = onSelectRail,
-                        onChannelChange = { direction ->
-                            if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
-                                val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size
-                                screen = Screen.NowPlaying(
-                                    PlayableItem.Live(favorites[nextIndex]),
-                                    returnTo = currentScreen.returnTo
-                                )
-                            }
+
+                    if (currentScreen.viewMode == PlayerViewMode.ReducedWithGuide && item is PlayableItem.Live) {
+                        // Back-from-full-screen-live destination: same
+                        // shared player, shrunk over the EPG guide (see
+                        // [[navigation_model_spec]]). Reuses WithRail so
+                        // "Back again" opens the menu over this guide and
+                        // "Back again" from there hits the same onExitApp
+                        // uniform exit as every other screen - no separate
+                        // overlay mechanism needed.
+                        WithRail(selected = RailItem.MyChannel, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
+                            FavoritesScreen(
+                                favorites = favorites,
+                                epgWindows = epgWindows,
+                                defaultStreamId = defaultStreamId,
+                                streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
+                                onPlay = { channel ->
+                                    screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = currentScreen.returnTo)
+                                },
+                                onRemove = toggleFavorite,
+                                onSetDefault = onSetDefault,
+                                mode = GuideMode.Embedded,
+                                livePlaybackHolder = livePlaybackHolder,
+                                tunedChannel = item.channel,
+                                onChannelTuned = { channel ->
+                                    screen = Screen.NowPlaying(
+                                        PlayableItem.Live(channel),
+                                        returnTo = currentScreen.returnTo,
+                                        viewMode = PlayerViewMode.ReducedWithGuide
+                                    )
+                                },
+                                onExpand = {
+                                    screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.Fullscreen)
+                                }
+                            )
                         }
-                    )
+                    } else {
+                        PlayerScreen(
+                            title = params.title,
+                            iconUrl = params.iconUrl,
+                            streamUrl = params.streamUrl,
+                            contentId = params.contentId,
+                            isLive = params.isLive,
+                            api = api,
+                            channelDb = channelDb,
+                            subtitle = params.subtitle,
+                            loadDetails = params.loadDetails,
+                            onSelectRail = onSelectRail,
+                            onChannelChange = { direction ->
+                                if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
+                                    val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size
+                                    screen = Screen.NowPlaying(
+                                        PlayableItem.Live(favorites[nextIndex]),
+                                        returnTo = currentScreen.returnTo
+                                    )
+                                }
+                            },
+                            livePlaybackHolder = if (params.isLive) livePlaybackHolder else null,
+                            onReduceToGuide = {
+                                screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.ReducedWithGuide)
+                            }
+                        )
+                    }
                 }
             }
           }

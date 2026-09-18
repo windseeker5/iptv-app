@@ -98,6 +98,16 @@ private const val HalfHourSeconds = 30 * 60L
 // browse future/past programs without leaving the guide row focus.
 private const val ScrollStepMinutes = 30f
 
+// BrowseOnly is today's "My TV" screen, reached from the rail, unchanged.
+// Embedded is the new reduced-live-over-guide view (Back from full-screen
+// live) - it swaps the top preview's own throwaway player for the shared
+// LivePlaybackHolder (so shrinking/expanding never reloads the stream),
+// retunes that shared player as focus moves between rows (Up/Down), remaps
+// the grid's Left key from "open the side rail" to "scroll the timeline
+// backward", and sends OK/select to onExpand() (return to full-screen)
+// instead of starting a fresh full-screen navigation.
+enum class GuideMode { BrowseOnly, Embedded }
+
 @Composable
 fun FavoritesScreen(
     favorites: List<LiveChannel>,
@@ -106,7 +116,14 @@ fun FavoritesScreen(
     streamUrlFor: (Int) -> String,
     onPlay: (LiveChannel) -> Unit,
     onRemove: (LiveChannel) -> Unit,
-    onSetDefault: (LiveChannel) -> Unit
+    onSetDefault: (LiveChannel) -> Unit,
+    mode: GuideMode = GuideMode.BrowseOnly,
+    // Embedded-only params (see GuideMode doc above) - null/no-op defaults
+    // keep every existing BrowseOnly call site unchanged.
+    livePlaybackHolder: LivePlaybackHolder? = null,
+    tunedChannel: LiveChannel? = null,
+    onChannelTuned: (LiveChannel) -> Unit = {},
+    onExpand: () -> Unit = {}
 ) {
     val nowEpoch = rememberNowEpochSeconds()
 
@@ -120,14 +137,25 @@ fun FavoritesScreen(
             return@Box
         }
 
-        val tunedChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
+        // Embedded mode always retunes the one shared player whenever the
+        // highlighted channel changes (initial entry or a later Up/Down) -
+        // this is the actual "Up/Down switches the channel, not just a
+        // preview" behavior; BrowseOnly's own separate throwaway preview
+        // player (TopPreviewBlock/LivePreview below) is untouched.
+        if (mode == GuideMode.Embedded && livePlaybackHolder != null && tunedChannel != null) {
+            LaunchedEffect(tunedChannel) {
+                livePlaybackHolder.tune(tunedChannel.streamId, streamUrlFor(tunedChannel.streamId))
+            }
+        }
+
+        val defaultTunedChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
         // The top preview follows whichever row currently has D-pad focus (not
         // necessarily the default/tuned channel) - lets you browse the guide
         // and hear/see each channel's own live audio + description without
         // leaving this screen. Starts on the tuned channel since that's where
         // initial focus lands in the grid below.
-        var previewChannel by remember { mutableStateOf(tunedChannel) }
-        val displayedChannel = previewChannel ?: tunedChannel
+        var previewChannel by remember { mutableStateOf(defaultTunedChannel) }
+        val displayedChannel = if (mode == GuideMode.Embedded) tunedChannel else (previewChannel ?: defaultTunedChannel)
 
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 16.dp)) {
             TopPreviewBlock(
@@ -136,7 +164,15 @@ fun FavoritesScreen(
                     epgWindows[channel.streamId].orEmpty()
                         .firstOrNull { nowEpoch in it.startEpochSeconds until it.stopEpochSeconds }
                 },
-                streamUrl = displayedChannel?.let { streamUrlFor(it.streamId) },
+                // Embedded never gets a live video surface here (see
+                // SharedLivePreview's removal note below) - falls to the
+                // channel-icon fallback branch, same as "no stream" does in
+                // BrowseOnly.
+                previewSource = if (mode == GuideMode.BrowseOnly && displayedChannel != null) {
+                    PreviewSource.OwnPlayer(streamUrlFor(displayedChannel.streamId))
+                } else {
+                    null
+                },
                 nowEpoch = nowEpoch
             )
             Spacer(modifier = Modifier.height(10.dp))
@@ -145,11 +181,15 @@ fun FavoritesScreen(
                 epgWindows = epgWindows,
                 defaultStreamId = defaultStreamId,
                 nowEpoch = nowEpoch,
-                initialFocusStreamId = defaultStreamId,
-                onPlay = onPlay,
+                initialFocusStreamId = if (mode == GuideMode.Embedded) tunedChannel?.streamId else defaultStreamId,
+                mode = mode,
+                onPlay = if (mode == GuideMode.Embedded) { _ -> onExpand() } else onPlay,
                 onSetDefault = onSetDefault,
                 onRemove = onRemove,
-                onFocusedChannelChanged = { channel -> previewChannel = channel },
+                onFocusedChannelChanged = { channel ->
+                    previewChannel = channel
+                    if (mode == GuideMode.Embedded) onChannelTuned(channel)
+                },
                 modifier = Modifier.weight(1f).fillMaxWidth()
             )
         }
@@ -167,6 +207,7 @@ private fun EpgTimelineGrid(
     defaultStreamId: Int?,
     nowEpoch: Long,
     initialFocusStreamId: Int?,
+    mode: GuideMode,
     onPlay: (LiveChannel) -> Unit,
     onSetDefault: (LiveChannel) -> Unit,
     onRemove: (LiveChannel) -> Unit,
@@ -204,18 +245,34 @@ private fun EpgTimelineGrid(
                         .weight(1f)
                         .fillMaxWidth()
                         .onKeyEvent { event ->
-                            // Right only - browse into the future. Left is
-                            // not handled here (per explicit direction): it
-                            // must bubble up unconsumed so WithRail's Left
-                            // handler can summon the side menu, same as
-                            // every other screen. There's no "see the past"
-                            // scroll on this screen.
+                            // BrowseOnly ("My TV" from the rail): Right only,
+                            // browses into the future - Left is left
+                            // unhandled so it bubbles up to WithRail's Left
+                            // handler and summons the side menu, same as
+                            // every other screen.
+                            // Embedded (reduced live view, reached via Back
+                            // from full-screen live): both directions scroll
+                            // the timeline - Left now moves backward instead
+                            // of opening anything (Back takes over that role
+                            // there, same as it does in the player) -
+                            // animateScrollBy already clamps at 0, so this
+                            // naturally stops at "now" without extra bounds
+                            // logic.
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                            if (event.key == Key.DirectionRight) {
-                                coroutineScope.launch { scrollState.animateScrollBy(scrollStepPx) }
-                                true
-                            } else {
-                                false
+                            when (event.key) {
+                                Key.DirectionRight -> {
+                                    coroutineScope.launch { scrollState.animateScrollBy(scrollStepPx) }
+                                    true
+                                }
+                                Key.DirectionLeft -> {
+                                    if (mode == GuideMode.Embedded) {
+                                        coroutineScope.launch { scrollState.animateScrollBy(-scrollStepPx) }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                else -> false
                             }
                         }
                 ) {
@@ -264,8 +321,16 @@ private fun EpgTimelineGrid(
     }
 }
 
+// BrowseOnly builds/tears down its own throwaway ExoPlayer (OwnPlayer), same
+// as before. Embedded mode never gets a live video surface here at all - see
+// the removal note where SharedLivePreview used to live, further down - so
+// it always passes null and falls to the channel-icon branch below.
+private sealed class PreviewSource {
+    data class OwnPlayer(val streamUrl: String) : PreviewSource()
+}
+
 @Composable
-private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, streamUrl: String?, nowEpoch: Long) {
+private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, previewSource: PreviewSource?, nowEpoch: Long) {
     Row(modifier = Modifier.fillMaxWidth().height(120.dp), verticalAlignment = Alignment.Top) {
         Box(
             modifier = Modifier
@@ -274,22 +339,23 @@ private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, streamU
                 .clip(RoundedCornerShape(10.dp))
                 .background(ScreenColors.CurrentlyPlayingCell)
         ) {
-            if (streamUrl != null) {
-                LivePreview(streamUrl = streamUrl, modifier = Modifier.fillMaxSize())
-            } else if (channel != null) {
-                AsyncImage(
-                    model = channel.streamIcon,
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(24.dp)
-                )
-            } else {
-                Text(
-                    text = "No default channel set",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.align(Alignment.Center).padding(8.dp)
-                )
+            when (previewSource) {
+                is PreviewSource.OwnPlayer -> LivePreview(streamUrl = previewSource.streamUrl, modifier = Modifier.fillMaxSize())
+                null -> if (channel != null) {
+                    AsyncImage(
+                        model = channel.streamIcon,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(24.dp)
+                    )
+                } else {
+                    Text(
+                        text = "No default channel set",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.align(Alignment.Center).padding(8.dp)
+                    )
+                }
             }
         }
         if (channel != null) {
@@ -359,6 +425,22 @@ private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
         update = { view -> view.player = exoPlayer }
     )
 }
+
+// A live video surface for the embedded/reduced preview was tried and
+// reverted (2026-09-18): reparenting the shared ExoPlayer's video output
+// from PlayerScreen's full-screen SurfaceView to a second surface here -
+// tried first as another PlayerView (SurfaceView), then as a raw TextureView
+// via Player.setVideoTextureView - caused a genuine ANR on real hardware
+// (this Chromecast with Google TV): the main thread blocked for ~18s
+// handling the Back keypress that triggered the swap, and the OS force-killed
+// the app. Audio kept playing fine throughout in both attempts - only video
+// output hot-swapping is unstable on this hardware. The embedded view now
+// shows the channel icon instead (TopPreviewBlock's existing "no live
+// surface" branch) - audio continuity via the shared player is preserved,
+// only the live video thumbnail in the reduced view is not. Revisit only
+// with real hardware testing budget, and consider whether a fixed
+// stop-then-attach sequence (rather than a live hot-swap) avoids the same
+// stall before trying again.
 
 @Composable
 private fun GuideHeader(
