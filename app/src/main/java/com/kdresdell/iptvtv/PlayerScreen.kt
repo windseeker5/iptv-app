@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -108,7 +110,17 @@ fun PlayerScreen(
     // Live-only: Back reduces to the embedded guide instead of opening the
     // in-player rail (see the Key.Back branch below). VOD/episode keep
     // opening the rail via openMenu(), unchanged.
-    onReduceToGuide: () -> Unit = {}
+    onReduceToGuide: () -> Unit = {},
+    // Live-only. The ONE-SCREEN design: the video view below is the same
+    // view in both modes - full-screen, or (reduced) shrunk to the top-left
+    // slot of the guide, drawn on top of a guide that's laid out behind it.
+    // Only the video's size changes between the two, never its surface,
+    // which is what avoids the freeze the old two-screen version hit
+    // (see [[android_tv_dev_loop]] on video hot-swap ANRs).
+    reduced: Boolean = false,
+    guideContent: @Composable () -> Unit = {},
+    // Back while the menu is open, live only - exits the whole app.
+    onExitApp: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // Recording is opt-in (see RecordingPrefs/SettingsScreen) - off by
@@ -138,6 +150,11 @@ fun PlayerScreen(
                 onDispose { livePlaybackHolder.onError = null }
             }
             LaunchedEffect(contentId, streamUrl) {
+                // Scrolling through the guide changes the highlighted
+                // channel on every Up/Down - this effect is cancelled and
+                // restarted per change, so the short delay makes the stream
+                // only switch once scrolling pauses, not on every row passed.
+                if (reduced && livePlaybackHolder.currentStreamId != contentId) delay(350)
                 livePlaybackHolder.tune(contentId, streamUrl)
             }
             livePlaybackHolder.player
@@ -440,9 +457,16 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+    // Full-screen: focus lives on this screen's own root (it handles every
+    // key itself). Reduced: focus belongs to the guide's grid, which
+    // requests its own initial focus when it appears - so only claim it here
+    // when going (or starting) full-screen.
+    LaunchedEffect(reduced) {
+        if (!reduced) focusRequester.requestFocus()
     }
+    // Lets us hand focus back to the guide (restoring the row that had it)
+    // after the menu closes over it.
+    val guideFocusRequester = remember { FocusRequester() }
 
     fun openMenu() {
         showInfo = false
@@ -480,7 +504,7 @@ fun PlayerScreen(
                 // this is the only place the real KeyDown can be caught to
                 // start the long-press timer. Always returns false so the
                 // event keeps propagating normally afterward.
-                if (!menuOpen &&
+                if (!menuOpen && !reduced &&
                     (event.key == Key.DirectionCenter || event.key == Key.Enter) &&
                     event.type == KeyEventType.KeyDown &&
                     event.nativeKeyEvent.repeatCount == 0
@@ -509,10 +533,29 @@ fun PlayerScreen(
                 // Cards get default TV focus/click handling (Up/Down move
                 // focus, Center/Enter selects).
                 if (menuOpen) {
-                    if (event.type == KeyEventType.KeyDown &&
-                        (event.key == Key.DirectionRight || event.key == Key.Back)
-                    ) {
-                        menuOpen = false
+                    if (event.type == KeyEventType.KeyDown) {
+                        if (event.key == Key.Back && isLive) {
+                            // Live: Back while the menu is open exits the
+                            // app (the nav spec's final step).
+                            onExitApp()
+                            return@onKeyEvent true
+                        }
+                        if (event.key == Key.DirectionRight || event.key == Key.Back) {
+                            menuOpen = false
+                            if (reduced) coroutineScope.launch { guideFocusRequester.requestFocus() }
+                            return@onKeyEvent true
+                        }
+                    }
+                    return@onKeyEvent false
+                }
+
+                // Reduced live view: the guide owns every key (Up/Down move
+                // between channels, Left/Right scroll time, OK expands) - it
+                // consumes those itself. The only thing reaching here that
+                // this screen cares about is Back, which opens the menu.
+                if (reduced) {
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.Back) {
+                        openMenu()
                         return@onKeyEvent true
                     }
                     return@onKeyEvent false
@@ -579,7 +622,24 @@ fun PlayerScreen(
                 }
             }
     ) {
-        if (isRecording && isLive) {
+        // Reduced live view: the guide is drawn FIRST (behind), then the
+        // video view below is drawn on top of it in the guide's top-left
+        // slot. Order matters - a video surface punches a hole through
+        // whatever was drawn before it, so the guide's own background fills
+        // the screen and the video simply shows through its slot.
+        if (reduced) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .focusRequester(guideFocusRequester)
+                    .focusRestorer()
+                    .focusGroup()
+            ) {
+                guideContent()
+            }
+        }
+
+        if (isRecording && isLive && !reduced) {
             // Replaces the video entirely rather than layering a message
             // over the frozen frame the provider leaves once it cuts the
             // live connection - see RecordingLockoutScreen. OK is fully
@@ -594,7 +654,18 @@ fun PlayerScreen(
             )
         } else {
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                // Same view in both modes - only its size/position changes
+                // (full-screen, or the guide's top-left 213x120 slot, which
+                // lines up with FavoritesScreen's TopPreviewBlock: 32dp/16dp
+                // screen padding).
+                modifier = if (reduced) {
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 32.dp, top = 16.dp)
+                        .size(width = 213.dp, height = 120.dp)
+                } else {
+                    Modifier.fillMaxSize()
+                },
                 factory = { ctx ->
                     PlayerView(ctx).apply {
                         player = exoPlayer
@@ -610,7 +681,7 @@ fun PlayerScreen(
                 update = { view -> view.player = exoPlayer }
             )
 
-            if (playbackError != null) {
+            if (playbackError != null && !reduced) {
                 Text(
                     text = "Could not play this title: $playbackError",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -619,7 +690,7 @@ fun PlayerScreen(
                 )
             }
 
-            if (seekFeedbackAtMs != null) {
+            if (seekFeedbackAtMs != null && !reduced) {
                 SeekFeedbackOverlay(
                     deltaMs = seekDeltaMs,
                     positionMs = seekTargetMs ?: exoPlayer.currentPosition,
@@ -627,7 +698,7 @@ fun PlayerScreen(
                 )
             }
 
-            if (showInfo && seekFeedbackAtMs == null) {
+            if (showInfo && seekFeedbackAtMs == null && !reduced) {
                 PlayerInfoOverlay(
                     channelName = TitleFormat.clean(title),
                     programTitle = TitleFormat.clean(displayTitle),
@@ -683,7 +754,7 @@ fun PlayerScreen(
         // used everywhere else in the app, not a separate implementation.
         if (menuOpen) {
             SideRail(
-                selected = null,
+                selected = if (reduced) RailItem.MyChannel else null,
                 onSelect = { item ->
                     menuOpen = false
                     onSelectRail(item)

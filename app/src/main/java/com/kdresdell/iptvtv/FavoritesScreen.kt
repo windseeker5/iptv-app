@@ -99,13 +99,12 @@ private const val HalfHourSeconds = 30 * 60L
 private const val ScrollStepMinutes = 30f
 
 // BrowseOnly is today's "My TV" screen, reached from the rail, unchanged.
-// Embedded is the new reduced-live-over-guide view (Back from full-screen
-// live) - it swaps the top preview's own throwaway player for the shared
-// LivePlaybackHolder (so shrinking/expanding never reloads the stream),
-// retunes that shared player as focus moves between rows (Up/Down), remaps
-// the grid's Left key from "open the side rail" to "scroll the timeline
-// backward", and sends OK/select to onExpand() (return to full-screen)
-// instead of starting a fresh full-screen navigation.
+// Embedded is the guide shown while watching live (Back from full-screen):
+// PlayerScreen draws its own live video on top of this guide's top-left
+// slot, so this composable draws no video itself in that mode. Up/Down
+// report the highlighted channel (onChannelTuned) so the player can switch to
+// it, Left/Right scroll the timeline both ways (no side menu - Back opens
+// that), and OK calls onExpand() to go back to full-screen.
 enum class GuideMode { BrowseOnly, Embedded }
 
 @Composable
@@ -120,7 +119,6 @@ fun FavoritesScreen(
     mode: GuideMode = GuideMode.BrowseOnly,
     // Embedded-only params (see GuideMode doc above) - null/no-op defaults
     // keep every existing BrowseOnly call site unchanged.
-    livePlaybackHolder: LivePlaybackHolder? = null,
     tunedChannel: LiveChannel? = null,
     onChannelTuned: (LiveChannel) -> Unit = {},
     onExpand: () -> Unit = {}
@@ -135,17 +133,6 @@ fun FavoritesScreen(
                 modifier = Modifier.align(Alignment.Center)
             )
             return@Box
-        }
-
-        // Embedded mode always retunes the one shared player whenever the
-        // highlighted channel changes (initial entry or a later Up/Down) -
-        // this is the actual "Up/Down switches the channel, not just a
-        // preview" behavior; BrowseOnly's own separate throwaway preview
-        // player (TopPreviewBlock/LivePreview below) is untouched.
-        if (mode == GuideMode.Embedded && livePlaybackHolder != null && tunedChannel != null) {
-            LaunchedEffect(tunedChannel) {
-                livePlaybackHolder.tune(tunedChannel.streamId, streamUrlFor(tunedChannel.streamId))
-            }
         }
 
         val defaultTunedChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
@@ -442,6 +429,30 @@ private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
 // stop-then-attach sequence (rather than a live hot-swap) avoids the same
 // stall before trying again.
 
+// Confirmed on real hardware (2026-09-18): composing the guide's full week of
+// programs (hundreds of boxes per channel + ~336 time labels) blocked this
+// TV's main thread for ~18s (the "guide is slow" bug, and the freeze that was
+// wrongly blamed on video). The timeline keeps its full width so scrolling
+// still reaches the end, but only the part near the visible area is composed.
+// Bucketed to one scroll step so this only recomposes when scrolling crosses
+// a 30-minute boundary, not on every pixel.
+private const val VisibleAheadMinutes = 480f
+private const val VisibleBehindMinutes = 60f
+
+@Composable
+private fun rememberVisibleWindow(scrollState: ScrollState, windowStartEpoch: Long): Pair<Long, Long> {
+    val density = LocalDensity.current
+    val stepPx = with(density) { (ScrollStepMinutes * PxPerMinute).dp.toPx() }
+    val bucket by remember(scrollState, stepPx) {
+        androidx.compose.runtime.derivedStateOf { (scrollState.value / stepPx).toInt() }
+    }
+    val startMin = bucket * ScrollStepMinutes
+    val visStart = windowStartEpoch + ((startMin - VisibleBehindMinutes).coerceAtLeast(0f) * 60).toLong()
+    val visEnd = windowStartEpoch + ((startMin + VisibleAheadMinutes) * 60).toLong()
+    return visStart to visEnd
+}
+
+
 @Composable
 private fun GuideHeader(
     windowStartEpoch: Long,
@@ -460,8 +471,11 @@ private fun GuideHeader(
                 .horizontalScroll(scrollState)
         ) {
             Box(modifier = Modifier.width(timelineWidth(windowStartEpoch, windowEndEpoch)).fillMaxHeight()) {
-                var slotEpoch = ((windowStartEpoch / HalfHourSeconds) + 1) * HalfHourSeconds
-                while (slotEpoch < windowEndEpoch) {
+                val (visStart, visEnd) = rememberVisibleWindow(scrollState, windowStartEpoch)
+                val firstSlot = ((windowStartEpoch / HalfHourSeconds) + 1) * HalfHourSeconds
+                var slotEpoch = max(firstSlot, ((visStart / HalfHourSeconds) + 1) * HalfHourSeconds)
+                val lastSlot = min(windowEndEpoch, visEnd)
+                while (slotEpoch < lastSlot) {
                     val offsetMinutes = (slotEpoch - windowStartEpoch) / 60f
                     Text(
                         text = formatTime(slotEpoch),
@@ -568,6 +582,10 @@ private fun EpgChannelRow(
                     )
                 }
                 val rowWindowEnd = windowEndEpochForRow(programs, windowStartEpoch)
+                val (visStart, visEnd) = rememberVisibleWindow(scrollState, windowStartEpoch)
+                val visiblePrograms = remember(programs, visStart, visEnd) {
+                    programs.filter { it.stopEpochSeconds > visStart && it.startEpochSeconds < visEnd }
+                }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -578,7 +596,7 @@ private fun EpgChannelRow(
                         // Any stretch of the visible window with no program data gets an
                         // explicit "No information" cell (mockup row 13, ICI MONTREAL) -
                         // a silent gap read as a rendering bug, not a real EPG hole.
-                        computeGaps(programs, windowStartEpoch, rowWindowEnd).forEach { (gapStart, gapEnd) ->
+                        computeGaps(visiblePrograms, max(windowStartEpoch, visStart), min(rowWindowEnd, visEnd)).forEach { (gapStart, gapEnd) ->
                             val startMinutes = (gapStart - windowStartEpoch) / 60f
                             val durationMinutes = (gapEnd - gapStart) / 60f
                             Box(
@@ -605,7 +623,7 @@ private fun EpgChannelRow(
                                 )
                             }
                         }
-                        programs.forEach { program ->
+                        visiblePrograms.forEach { program ->
                             val clampedStart = max(program.startEpochSeconds, windowStartEpoch)
                             if (clampedStart < program.stopEpochSeconds) {
                                 val startMinutes = (clampedStart - windowStartEpoch) / 60f

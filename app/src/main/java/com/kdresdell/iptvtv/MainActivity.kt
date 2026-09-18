@@ -593,67 +593,64 @@ class MainActivity : ComponentActivity() {
                         favorites.indexOfFirst { it.streamId == live.channel.streamId }
                     } ?: -1
 
-                    if (currentScreen.viewMode == PlayerViewMode.ReducedWithGuide && item is PlayableItem.Live) {
-                        // Back-from-full-screen-live destination: same
-                        // shared player, shrunk over the EPG guide (see
-                        // [[navigation_model_spec]]). Reuses WithRail so
-                        // "Back again" opens the menu over this guide and
-                        // "Back again" from there hits the same onExitApp
-                        // uniform exit as every other screen - no separate
-                        // overlay mechanism needed.
-                        WithRail(selected = RailItem.MyChannel, onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
-                            FavoritesScreen(
-                                favorites = favorites,
-                                epgWindows = epgWindows,
-                                defaultStreamId = defaultStreamId,
-                                streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
-                                onPlay = { channel ->
-                                    screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = currentScreen.returnTo)
-                                },
-                                onRemove = toggleFavorite,
-                                onSetDefault = onSetDefault,
-                                mode = GuideMode.Embedded,
-                                livePlaybackHolder = livePlaybackHolder,
-                                tunedChannel = item.channel,
-                                onChannelTuned = { channel ->
-                                    screen = Screen.NowPlaying(
-                                        PlayableItem.Live(channel),
-                                        returnTo = currentScreen.returnTo,
-                                        viewMode = PlayerViewMode.ReducedWithGuide
-                                    )
-                                },
-                                onExpand = {
-                                    screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.Fullscreen)
-                                }
-                            )
-                        }
-                    } else {
-                        PlayerScreen(
-                            title = params.title,
-                            iconUrl = params.iconUrl,
-                            streamUrl = params.streamUrl,
-                            contentId = params.contentId,
-                            isLive = params.isLive,
-                            api = api,
-                            channelDb = channelDb,
-                            subtitle = params.subtitle,
-                            loadDetails = params.loadDetails,
-                            onSelectRail = onSelectRail,
-                            onChannelChange = { direction ->
-                                if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
-                                    val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size
-                                    screen = Screen.NowPlaying(
-                                        PlayableItem.Live(favorites[nextIndex]),
-                                        returnTo = currentScreen.returnTo
-                                    )
-                                }
-                            },
-                            livePlaybackHolder = if (params.isLive) livePlaybackHolder else null,
-                            onReduceToGuide = {
-                                screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.ReducedWithGuide)
+                    // ONE screen for live, in two modes (see PlayerScreen's
+                    // `reduced` doc): the same PlayerScreen instance - and so
+                    // the same video view - stays mounted whether it's full
+                    // screen or shrunk into the guide's top-left slot, so
+                    // switching is a resize, not a screen swap.
+                    val reduced = currentScreen.viewMode == PlayerViewMode.ReducedWithGuide && item is PlayableItem.Live
+                    PlayerScreen(
+                        title = params.title,
+                        iconUrl = params.iconUrl,
+                        streamUrl = params.streamUrl,
+                        contentId = params.contentId,
+                        isLive = params.isLive,
+                        api = api,
+                        channelDb = channelDb,
+                        subtitle = params.subtitle,
+                        loadDetails = params.loadDetails,
+                        onSelectRail = onSelectRail,
+                        onChannelChange = { direction ->
+                            if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
+                                val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size
+                                screen = Screen.NowPlaying(
+                                    PlayableItem.Live(favorites[nextIndex]),
+                                    returnTo = currentScreen.returnTo
+                                )
                             }
-                        )
-                    }
+                        },
+                        livePlaybackHolder = if (params.isLive) livePlaybackHolder else null,
+                        onReduceToGuide = {
+                            screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.ReducedWithGuide)
+                        },
+                        reduced = reduced,
+                        onExitApp = onExitApp,
+                        guideContent = {
+                            if (item is PlayableItem.Live) {
+                                FavoritesScreen(
+                                    favorites = favorites,
+                                    epgWindows = epgWindows,
+                                    defaultStreamId = defaultStreamId,
+                                    streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
+                                    onPlay = { },
+                                    onRemove = toggleFavorite,
+                                    onSetDefault = onSetDefault,
+                                    mode = GuideMode.Embedded,
+                                    tunedChannel = item.channel,
+                                    onChannelTuned = { channel ->
+                                        screen = Screen.NowPlaying(
+                                            PlayableItem.Live(channel),
+                                            returnTo = currentScreen.returnTo,
+                                            viewMode = PlayerViewMode.ReducedWithGuide
+                                        )
+                                    },
+                                    onExpand = {
+                                        screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.Fullscreen)
+                                    }
+                                )
+                            }
+                        }
+                    )
                 }
             }
           }
