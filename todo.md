@@ -18,3 +18,11 @@ Working list of improvements and bugs to work through one at a time. For each it
 - [x] Player info overlay (OK button): title, description, and the now/next program rows are too large and take up too much of the screen - reduce text sizes so more of the video is visible
 - [x] Player info overlay "Hold OK to Record" hint: remove the red "Record" color, make the whole line the same light gray as the rest of the hint text; make the "OK" pill a fully round button with a black "OK" label instead of the current shape
 - [ ] Favorite star (e.g. seen adding a channel found via search, like Hockey/NCAA) shows before the channel name — should be after/at the end of the name instead
+- [ ] Clean the APK server folder: keep only files that are actually used
+- [ ] BUG: on Fire TV, exiting the app leaves the live stream audio still playing
+- [ ] My TV page (TV guide) takes too long to load — need a strategy to fix that
+- [ ] Remote control navigation overhaul — expected behavior per section:
+      1. App start goes to full-screen default stream.
+      2. Back (from full-screen stream) resizes/reduces the stream to a smaller view while continuing to play video/audio, showing the TV guide EPG behind/around it, with the EPG highlighting the channel currently being watched. Back again (from that reduced view) shows the menu over the guide.
+      3. Whenever the menu is open, Back exits the application and stops the audio (currently buggy — audio keeps playing on exit, see FireTV bug above).
+      4. In full-screen live stream: OK shows the info viewer overlay; only Back triggers the EPG guide (Left/Right do not). In the EPG guide view: Left/Right navigate earlier/later programs (time), Up/Down switch channel, and OK goes to full-screen.
