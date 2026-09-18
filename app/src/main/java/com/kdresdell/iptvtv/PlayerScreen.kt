@@ -38,6 +38,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -521,6 +523,20 @@ fun PlayerScreen(
     // only happens by picking a destination from the opened rail
     // (onSelectRail below) - deterministic, no accidental exits.
 
+    // 0 = full-screen, 1 = shrunk into the guide's slot. Only read inside
+    // layout/draw blocks below, so animating it re-lays-out and redraws
+    // without recomposing the screen on every frame.
+    val reduceProgress = androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (reduced) 1f else 0f,
+        animationSpec = androidx.compose.animation.core.tween(220),
+        label = "reduceProgress"
+    )
+    // Keep the guide composed until the expand animation has finished, so it
+    // is still there behind the growing video instead of vanishing at once.
+    val guideVisible by remember(reduced) {
+        androidx.compose.runtime.derivedStateOf { reduced || reduceProgress.value > 0.001f }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -658,7 +674,7 @@ fun PlayerScreen(
         // slot. Order matters - a video surface punches a hole through
         // whatever was drawn before it, so the guide's own background fills
         // the screen and the video simply shows through its slot.
-        if (reduced) {
+        if (guideVisible) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -689,13 +705,18 @@ fun PlayerScreen(
                 // (full-screen, or the guide's top-left 213x120 slot, which
                 // lines up with FavoritesScreen's TopPreviewBlock: 32dp/16dp
                 // screen padding).
-                modifier = if (reduced) {
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 32.dp, top = 16.dp)
-                        .size(width = 213.dp, height = 120.dp)
-                } else {
-                    Modifier.fillMaxSize()
+                modifier = Modifier.layout { measurable, constraints ->
+                    val p = reduceProgress.value
+                    val fw = constraints.maxWidth
+                    val fh = constraints.maxHeight
+                    val sw = 213.dp.roundToPx()
+                    val sh = 120.dp.roundToPx()
+                    val w = (fw + (sw - fw) * p).toInt()
+                    val h = (fh + (sh - fh) * p).toInt()
+                    val x = (32.dp.roundToPx() * p).toInt()
+                    val y = (16.dp.roundToPx() * p).toInt()
+                    val placeable = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(w, h))
+                    layout(fw, fh) { placeable.place(x, y) }
                 },
                 factory = { ctx ->
                     PlayerView(ctx).apply {
@@ -712,34 +733,37 @@ fun PlayerScreen(
                 update = { view -> view.player = exoPlayer }
             )
 
-            if (reduced) {
-                // Rounded corners for the video slot, without touching the
-                // video surface (hot-swapping/clipping video surfaces is
-                // risky on this TV and would cost speed): this draws the
-                // guide's background color over just the four corners, on
-                // top of the video. Matches TopPreviewBlock's 10dp corners.
-                val cornerColor = ScreenColors.FavoritesBackground
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 32.dp, top = 16.dp)
-                        .size(width = 213.dp, height = 120.dp)
-                        .drawBehind {
-                            val r = 10.dp.toPx()
+            // Rounded corners for the video slot, without touching the video
+            // surface (clipping/hot-swapping video surfaces is risky on this
+            // TV and would cost speed): draws the guide's background color
+            // over just the four corners, on top of the video, following the
+            // video as it resizes. Matches TopPreviewBlock's 10dp corners.
+            val cornerColor = ScreenColors.FavoritesBackground
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawBehind {
+                        val p = reduceProgress.value
+                        if (p > 0f) {
+                            val w = size.width + (213.dp.toPx() - size.width) * p
+                            val h = size.height + (120.dp.toPx() - size.height) * p
+                            val r = 10.dp.toPx() * p
                             val path = androidx.compose.ui.graphics.Path().apply {
                                 fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
-                                addRect(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height))
+                                addRect(androidx.compose.ui.geometry.Rect(0f, 0f, w, h))
                                 addRoundRect(
                                     androidx.compose.ui.geometry.RoundRect(
-                                        0f, 0f, size.width, size.height,
+                                        0f, 0f, w, h,
                                         androidx.compose.ui.geometry.CornerRadius(r, r)
                                     )
                                 )
                             }
-                            drawPath(path, cornerColor)
+                            translate(32.dp.toPx() * p, 16.dp.toPx() * p) {
+                                drawPath(path, cornerColor)
+                            }
                         }
-                )
-            }
+                    }
+            )
 
             if (playbackError != null && !reduced) {
                 Text(
