@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -22,6 +22,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -33,83 +34,157 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// Approved design (2026-09-17 design canvas, "Help screen - remote guide").
-// This app only targets Google TV, so the diagram shows exactly the buttons
-// its gestures use - the D-pad, OK and Back - and nothing else on the real
-// remote (mic, home, volume, power).
-private val RemoteWidth = 120.dp
-private val RemoteHeight = 230.dp
-private val DPadCenter = Offset(60f, 80f)
-private val DPadRadius = 46.dp
-private val BackCenter = Offset(60f, 166f)
-private val BackRadius = 16.dp
+// Remote diagram traced from Google's own Google TV remote drawing (2026-09-18,
+// user-supplied picture). Only the buttons this app's gestures use are kept:
+// the D-pad ring with OK in the middle, and Back. Everything else on the real
+// remote (Assistant, Home, Mute, app buttons, power, input, mic, volume) is
+// deliberately left out.
+//
+// All shape coordinates below are in the picture's own units (body 225 x 711);
+// U converts one unit to dp so the whole drawing scales from one number.
+private const val BodyW = 225f
+private const val BodyH = 711f
+private const val U = 300f / BodyH          // dp per picture unit -> remote is 300dp tall
+private val DPadCx = 112.5f
+private val DPadCy = 111f
+private const val DPadR = 98f
+private const val OkR = 35f
+private val BackCx = 58f
+private val BackCy = 258f
+private const val BackR = 33f
+
+private val LeftMargin = 64.dp   // room for the "Left" and "Back" labels
+private val RightMargin = 68.dp
+private val LineReach = 20.dp  // how far a leader line extends past the remote body  // room for the "Up" / "OK" / "Right" / "Down" labels
 
 private val OnSurface = Color(0xFFE4E7E4)
 private val OnSurfaceVariant = Color(0xFF9AA09A)
 private val AccentSoft = Color(0xFFA6F2A6)
+private val HackerGreen = Color(0xFF06F906) // theme Primary50Accent, same as the My TV title
 private val DividerColor = Color(0xFF2A2D2A)
 private val ScreenBackground = Color(0xFF0E100E)
 
+private fun dp(units: Float) = (units * U).dp
+
+// One label with a leader line: a dot on the button, a line out to the side,
+// and the text at the end of it. side = -1 puts the label on the left of the
+// remote, +1 on the right. (px, py) is the target in dp, relative to the body.
+private class Callout(val text: String, val px: Dp, val py: Dp, val side: Int)
+
 @Composable
-private fun RemoteDiagram(modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier.size(RemoteWidth, RemoteHeight)) {
-        val strokeWidth = 3.dp.toPx()
+private fun LabeledRemote(modifier: Modifier = Modifier) {
+    val bodyW = dp(BodyW)
+    val bodyH = dp(BodyH)
+    val cx = dp(DPadCx)
+    val cy = dp(DPadCy)
+    val ringStep = 12.dp  // vertical spacing between the labels on the right
 
-        drawRoundRect(
-            color = OnSurface,
-            topLeft = Offset(4.dp.toPx(), 4.dp.toPx()),
-            size = androidx.compose.ui.geometry.Size(112.dp.toPx(), 222.dp.toPx()),
-            cornerRadius = CornerRadius(56.dp.toPx()),
-            style = Stroke(strokeWidth)
-        )
+    val callouts = listOf(
+        Callout("Up", cx, cy - ringStep * 3, 1),
+        Callout("OK", cx, cy - ringStep, 1),
+        Callout("Right", cx + ringStep * 3, cy + ringStep, 1),
+        Callout("Down", cx, cy + ringStep * 3, 1),
+        Callout("Left", cx - ringStep * 3, cy, -1),
+        Callout("Back", dp(BackCx - BackR - 3f), dp(BackCy), -1)
+    )
 
-        val dpadCenterPx = Offset(DPadCenter.x.dp.toPx(), DPadCenter.y.dp.toPx())
-        drawCircle(color = OnSurface, radius = DPadRadius.toPx(), center = dpadCenterPx, style = Stroke(strokeWidth))
+    Box(modifier = modifier.size(LeftMargin + bodyW + RightMargin, bodyH)) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val stroke = 2.5.dp.toPx()
+            val ox = LeftMargin.toPx()
 
-        // Direction ticks (up/down/left/right) just inside the ring
-        val tickInner = 38.dp.toPx()
-        val tickOuter = 48.dp.toPx()
-        listOf(
-            Offset(0f, -1f), // up
-            Offset(0f, 1f),  // down
-            Offset(-1f, 0f), // left
-            Offset(1f, 0f)   // right
-        ).forEach { dir ->
-            drawLine(
-                color = OnSurfaceVariant,
-                start = dpadCenterPx + Offset(dir.x * tickInner, dir.y * tickInner),
-                end = dpadCenterPx + Offset(dir.x * tickOuter, dir.y * tickOuter),
-                strokeWidth = strokeWidth,
-                cap = StrokeCap.Round
+            // Body: rounded rectangle with fully round ends
+            drawRoundRect(
+                color = OnSurface,
+                topLeft = Offset(ox + stroke / 2, stroke / 2),
+                size = androidx.compose.ui.geometry.Size(bodyW.toPx() - stroke, bodyH.toPx() - stroke),
+                cornerRadius = CornerRadius(bodyW.toPx() / 2),
+                style = Stroke(stroke)
             )
-        }
 
-        // OK center dot
-        drawCircle(color = AccentSoft, radius = 15.dp.toPx(), center = dpadCenterPx)
+            // D-pad ring with the OK button in the middle
+            val dpad = Offset(ox + cx.toPx(), cy.toPx())
+            drawCircle(color = OnSurface, radius = dp(DPadR).toPx(), center = dpad, style = Stroke(stroke))
+            drawCircle(color = AccentSoft, radius = dp(OkR).toPx(), center = dpad)
 
-        // Back button + chevron
-        val backCenterPx = Offset(BackCenter.x.dp.toPx(), BackCenter.y.dp.toPx())
-        drawCircle(color = OnSurface, radius = BackRadius.toPx(), center = backCenterPx, style = Stroke(strokeWidth))
-        val chevron = Path().apply {
-            moveTo(backCenterPx.x + 5.dp.toPx(), backCenterPx.y - 6.dp.toPx())
-            lineTo(backCenterPx.x - 3.dp.toPx(), backCenterPx.y)
-            lineTo(backCenterPx.x + 5.dp.toPx(), backCenterPx.y + 6.dp.toPx())
+            // Back button: circle with a left arrow
+            val back = Offset(ox + dp(BackCx).toPx(), dp(BackCy).toPx())
+            val backR = dp(BackR).toPx()
+            drawCircle(color = OnSurface, radius = backR, center = back, style = Stroke(stroke))
+            val half = backR * 0.42f
+            val head = backR * 0.32f
+            drawLine(OnSurface, Offset(back.x - half, back.y), Offset(back.x + half, back.y), stroke, StrokeCap.Round)
+            val arrowHead = Path().apply {
+                moveTo(back.x - half + head, back.y - head)
+                lineTo(back.x - half, back.y)
+                lineTo(back.x - half + head, back.y + head)
+            }
+            drawPath(arrowHead, OnSurface, style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
+
+            // Leader lines: dot on the button, line out past the body's edge
+            callouts.forEach { c ->
+                val start = Offset(ox + c.px.toPx(), c.py.toPx())
+                val endX = if (c.side > 0) ox + bodyW.toPx() + LineReach.toPx() else ox - LineReach.toPx()
+                drawLine(OnSurfaceVariant, start, Offset(endX, start.y), 1.5.dp.toPx(), StrokeCap.Round)
+                drawCircle(if (c.text == "OK") Color.Black else OnSurfaceVariant, 2.5.dp.toPx(), start)
+            }
         }
-        drawPath(chevron, color = OnSurface, style = Stroke(2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        callouts.forEach { c ->
+            val y = c.py - 8.dp
+            if (c.side > 0) {
+                Text(
+                    text = c.text,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Light,
+                    color = OnSurface,
+                    modifier = Modifier.offset(LeftMargin + bodyW + LineReach + 4.dp, y)
+                )
+            } else {
+                Text(
+                    text = c.text,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Light,
+                    color = OnSurface,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.offset(0.dp, y).width(LeftMargin - LineReach - 4.dp)
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun Callout(title: String, body: String, dotColor: Color = OnSurfaceVariant) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
-            Text(text = title, fontSize = 22.sp, fontWeight = FontWeight.Medium, color = OnSurface)
-        }
-        Text(text = body, fontSize = 17.sp, color = OnSurfaceVariant, modifier = Modifier.padding(start = 18.dp))
+private fun KeyLine(key: String, result: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = key,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Medium,
+            color = AccentSoft,
+            modifier = Modifier.width(120.dp)
+        )
+        Text(text = result, fontSize = 17.sp, color = OnSurface)
+    }
+}
+
+@Composable
+private fun HelpGroup(title: String, modifier: Modifier = Modifier, lines: List<Pair<String, String>>) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = title.uppercase(),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 2.sp,
+            color = OnSurfaceVariant
+        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(DividerColor))
+        Spacer(modifier = Modifier.height(2.dp))
+        lines.forEach { (key, result) -> KeyLine(key, result) }
     }
 }
 
@@ -147,44 +222,66 @@ fun HelpScreen() {
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 letterSpacing = 2.sp,
-                color = OnSurfaceVariant,
+                color = HackerGreen,
                 modifier = Modifier.padding(bottom = 6.dp)
             )
-            Text(text = "Remote Guide", fontSize = 44.sp, color = OnSurface)
+            Text(text = "Remote Guide", fontSize = 34.sp, color = OnSurfaceVariant)
 
             // Remaining space below the title: this group centers within it
             Column(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 verticalArrangement = Arrangement.Center
             ) {
-                Row {
-                    RemoteDiagram()
-                    Spacer(modifier = Modifier.width(44.dp))
-                    Box(modifier = Modifier.height(RemoteHeight).weight(1f)) {
-                        Box(modifier = Modifier.padding(top = 38.dp)) {
-                            Callout(
-                                title = "OK — press and hold",
-                                body = "Start or stop recording the channel",
-                                dotColor = AccentSoft
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledRemote()
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(20.dp)
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(40.dp)) {
+                            HelpGroup(
+                                title = "Watching a channel",
+                                modifier = Modifier.weight(1f),
+                                lines = listOf(
+                                    "OK" to "Channel info",
+                                    "Up / Down" to "Change channel",
+                                    "Hold OK" to "Record on / off",
+                                    "Back" to "Show the guide"
+                                )
+                            )
+                            HelpGroup(
+                                title = "In the guide",
+                                modifier = Modifier.weight(1f),
+                                lines = listOf(
+                                    "Left / Right" to "Move through time",
+                                    "Up / Down" to "Change channel",
+                                    "OK" to "Back to full screen",
+                                    "Back" to "Open the menu"
+                                )
                             )
                         }
-                        Box(modifier = Modifier.padding(top = 144.dp)) {
-                            Callout(
-                                title = "Back",
-                                body = "Opens the menu while watching - press again to exit"
+                        Row(horizontalArrangement = Arrangement.spacedBy(40.dp)) {
+                            HelpGroup(
+                                title = "In the menu",
+                                modifier = Modifier.weight(1f),
+                                lines = listOf(
+                                    "Up / Down" to "Choose a page",
+                                    "OK" to "Open it",
+                                    "Right" to "Back to the video",
+                                    "Back" to "Exit the app"
+                                )
+                            )
+                            HelpGroup(
+                                title = "In any list",
+                                modifier = Modifier.weight(1f),
+                                lines = listOf(
+                                    "Hold OK" to "Favorite or default"
+                                )
                             )
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(28.dp))
-                Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(DividerColor))
-                Spacer(modifier = Modifier.height(28.dp))
-
-                Callout(
-                    title = "Press and hold OK on an item",
-                    body = "Favorite, set as default, or remove it"
-                )
             }
         }
     }
