@@ -51,6 +51,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -687,23 +688,26 @@ private fun PlayerInfoOverlay(
             .background(
                 // Black at the bottom, fading to transparent going up. Two
                 // hard constraints pinned this shape:
-                // - must reach solid black by ~0.48 (measured on-device:
-                //   the info block's icon/title top edge), or they lose
-                //   their dark backing and become unreadable again.
+                // - must reach solid black by ~0.55 (measured on-device
+                //   after the text-size pass below shrank the info block:
+                //   its icon/title top edge sits lower on screen now than
+                //   when this was tuned to 0.48, so the fade needed to move
+                //   down with it or the top of the block lost its dark
+                //   backing - explicit user request 2026-09-17).
                 // - the user explicitly wants the fade compressed into a
                 //   short span ("transparent quicker") rather than starting
                 //   near the very top of the screen - video should stay
-                //   fully clear until ~30% down, then fade over a short
+                //   fully clear until ~37% down, then fade over a short
                 //   stretch into the required-solid point.
-                // Same eased curve (smoothstep) as before, just narrowed to
-                // the 0.30-0.48 span instead of starting at 0.05.
+                // Same eased curve (smoothstep) as before, just shifted down
+                // to the 0.37-0.55 span instead of 0.30-0.48.
                 Brush.verticalGradient(
                     colorStops = arrayOf(
-                        0.30f to Color.Transparent,
-                        0.35f to Color.Black.copy(alpha = 0.16f),
-                        0.39f to Color.Black.copy(alpha = 0.5f),
-                        0.44f to Color.Black.copy(alpha = 0.84f),
-                        0.48f to Color.Black
+                        0.37f to Color.Transparent,
+                        0.42f to Color.Black.copy(alpha = 0.16f),
+                        0.46f to Color.Black.copy(alpha = 0.5f),
+                        0.51f to Color.Black.copy(alpha = 0.84f),
+                        0.55f to Color.Black
                     )
                 )
             )
@@ -787,7 +791,7 @@ private fun PlayerInfoOverlay(
                         Text(
                             text = description,
                             color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodyLarge.copy(shadow = textShadow),
+                            style = MaterialTheme.typography.bodyMedium.copy(shadow = textShadow),
                             modifier = Modifier.padding(top = 4.dp)
                         )
                     }
@@ -824,7 +828,7 @@ private fun PlayerInfoOverlay(
                     Text(
                         text = programTitle,
                         color = MaterialTheme.colorScheme.onSurface,
-                        style = MaterialTheme.typography.headlineSmall.copy(shadow = textShadow)
+                        style = MaterialTheme.typography.titleLarge.copy(shadow = textShadow)
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(
@@ -847,7 +851,7 @@ private fun PlayerInfoOverlay(
                         Text(
                             text = description,
                             color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodyLarge.copy(shadow = textShadow),
+                            style = MaterialTheme.typography.bodyMedium.copy(shadow = textShadow),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -928,32 +932,38 @@ private fun PlayerInfoOverlay(
                     Text(
                         text = "Hold",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodySmall
                     )
-                    // A pill instead of the bare word "OK" - reads as a
-                    // pressable button, not just a label.
+                    // A real circle (matching the remote's physical OK
+                    // button) instead of the earlier stadium-shaped pill -
+                    // explicit user request. White fill + black label reads
+                    // as a distinct physical button against the rest of the
+                    // light-grey hint text, the way the real remote's OK key
+                    // looks against its own bezel. Shrunk from 28dp - explicit
+                    // user request that this whole hint read as a small,
+                    // secondary hint, not a same-size sibling of the program
+                    // text above it.
                     Box(
                         modifier = Modifier
-                            .padding(horizontal = 8.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(appColors.surfaceContainerHighest)
-                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                            .padding(horizontal = 6.dp)
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(Color.White),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = "OK",
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.labelMedium
+                            color = Color.Black,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp)
                         )
                     }
                     Text(
-                        text = "to ",
+                        // "Record" no longer picked out in red - explicit
+                        // user request that this whole hint read as one
+                        // uniform light-grey line, not call out the word.
+                        text = "to Record",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        text = "Record",
-                        color = ScreenColors.RecordAccent,
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
