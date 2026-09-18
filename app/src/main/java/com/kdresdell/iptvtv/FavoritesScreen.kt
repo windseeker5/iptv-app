@@ -463,7 +463,16 @@ private fun GuideHeader(
 ) {
     val windowEndEpoch = windowEndEpoch(favorites, epgWindows, windowStartEpoch)
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Spacer(modifier = Modifier.width(channelColumnWidth))
+        // Title of the channel column, in the space left of the time labels -
+        // same 20dp height as that row so the grid doesn't move. Explicit
+        // user request (2026-09-18): shows this is the user's own My TV list.
+        Box(modifier = Modifier.width(channelColumnWidth).height(20.dp), contentAlignment = Alignment.CenterStart) {
+            Text(
+                text = "My TV",
+                color = LocalAppColors.current.vividAccent,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            )
+        }
         Box(
             modifier = Modifier
                 .weight(1f)
