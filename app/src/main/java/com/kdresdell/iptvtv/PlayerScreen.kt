@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -710,6 +711,35 @@ fun PlayerScreen(
                 },
                 update = { view -> view.player = exoPlayer }
             )
+
+            if (reduced) {
+                // Rounded corners for the video slot, without touching the
+                // video surface (hot-swapping/clipping video surfaces is
+                // risky on this TV and would cost speed): this draws the
+                // guide's background color over just the four corners, on
+                // top of the video. Matches TopPreviewBlock's 10dp corners.
+                val cornerColor = ScreenColors.FavoritesBackground
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 32.dp, top = 16.dp)
+                        .size(width = 213.dp, height = 120.dp)
+                        .drawBehind {
+                            val r = 10.dp.toPx()
+                            val path = androidx.compose.ui.graphics.Path().apply {
+                                fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+                                addRect(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height))
+                                addRoundRect(
+                                    androidx.compose.ui.geometry.RoundRect(
+                                        0f, 0f, size.width, size.height,
+                                        androidx.compose.ui.geometry.CornerRadius(r, r)
+                                    )
+                                )
+                            }
+                            drawPath(path, cornerColor)
+                        }
+                )
+            }
 
             if (playbackError != null && !reduced) {
                 Text(
