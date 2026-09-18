@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -95,15 +97,30 @@ fun ChannelRow(
             LiveThumbnail(channel.streamIcon)
             Column(modifier = Modifier.weight(1f)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // §6 "Lists": Title Small primary text.
+                    Text(text = TitleFormat.clean(channel.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                     // Long-press replaced the always-visible favorite
                     // button, so this star is the only in-line feedback
                     // that a row is already a favorite - without it there
-                    // was no way to tell short of opening the menu.
+                    // was no way to tell short of opening the menu. Trails
+                    // the name (not leading it) so titles stay aligned in a
+                    // list - explicit user request (2026-09-18).
                     if (isFavorite) {
                         Text(text = "★", color = Color(0xFFA6F2A6))
                     }
-                    // §6 "Lists": Title Small primary text.
-                    Text(text = TitleFormat.clean(channel.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                    // Default channel gets its own marker, same small-dot
+                    // motif as the "now" indicator in the My TV EPG grid
+                    // (FavoritesScreen's tunedIndicator circle) - reusing
+                    // that existing visual language instead of inventing a
+                    // new one for the same "this is the one" concept.
+                    if (isDefault) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(LocalAppColors.current.tunedIndicator)
+                        )
+                    }
                 }
                 if (subtitle != null) {
                     // §6 "Lists": Body Medium secondary text.
