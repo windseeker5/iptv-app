@@ -147,7 +147,10 @@ fun PlayerScreen(
         if (isLive && livePlaybackHolder != null) {
             DisposableEffect(livePlaybackHolder) {
                 livePlaybackHolder.onError = { message -> playbackError = message }
-                onDispose { livePlaybackHolder.onError = null }
+                onDispose {
+                    livePlaybackHolder.onError = null
+                    livePlaybackHolder.stop()
+                }
             }
             LaunchedEffect(contentId, streamUrl) {
                 // Scrolling through the guide changes the highlighted
@@ -176,6 +179,33 @@ fun PlayerScreen(
             }
             player
         }
+    }
+
+    // Home button / switching apps stops the Activity but nothing stopped the
+    // player, so the stream's audio kept playing over the launcher (confirmed
+    // on real hardware, 2026-09-18 - the same bug first seen on Fire TV).
+    // Pause when the app leaves the screen, and on return resume - live
+    // streams jump back to the live edge rather than continuing stale.
+    val resumeAfterStop = remember { booleanArrayOf(false) }
+    DisposableEffect(exoPlayer, isLive) {
+        val lifecycle = (context as? androidx.activity.ComponentActivity)?.lifecycle
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    resumeAfterStop[0] = exoPlayer.playWhenReady
+                    exoPlayer.playWhenReady = false
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_START -> if (resumeAfterStop[0]) {
+                    resumeAfterStop[0] = false
+                    if (isLive) exoPlayer.seekToDefaultPosition()
+                    exoPlayer.prepare()
+                    exoPlayer.playWhenReady = true
+                }
+                else -> {}
+            }
+        }
+        lifecycle?.addObserver(observer)
+        onDispose { lifecycle?.removeObserver(observer) }
     }
 
     // Google TV's screensaver/sleep timer has no idea video is playing here

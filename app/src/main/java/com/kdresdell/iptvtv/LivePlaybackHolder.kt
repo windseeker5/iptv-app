@@ -47,7 +47,22 @@ class LivePlaybackHolder(context: Context) {
         player.playWhenReady = true
     }
 
+    private var released = false
+
+    // Stops playback and forgets the current channel, so the next tune() to
+    // the same channel starts fresh instead of being skipped as "already
+    // tuned". Called whenever the live screen goes away (menu -> Search etc.)
+    // - the shared player is no longer tied to a composable's lifecycle, so
+    // without this its audio kept playing on every other screen.
+    fun stop() {
+        if (released) return
+        currentStreamId = null
+        player.stop()
+        player.clearMediaItems()
+    }
+
     fun release() {
+        released = true
         player.release()
     }
 }
