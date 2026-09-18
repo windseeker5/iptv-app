@@ -7,9 +7,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -180,26 +181,19 @@ fun SearchScreen(
             // further here on explicit user feedback that 48dp still read
             // as too tight for this screen.
             .padding(horizontal = 64.dp, vertical = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
         // App-defined, informational-only cluster: at-a-glance catalog
         // totals + subscription status. Kept as its own tightly-spaced
         // group (not the screen's normal 14dp rhythm) so it reads as a
         // compact strip, not a third of the screen.
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            SearchKpiRow(
-                liveCount = syncedLiveCount,
-                seriesCount = syncedSeriesCount,
-                vodCount = syncedVodCount
-            )
-            // Only rendered when the provider actually returned both dates
-            // - some providers omit exp_date entirely for lifetime
-            // accounts, and there's nothing meaningful to draw without a
-            // start date to measure elapsed time from.
-            if (accountCreatedAt != null && accountExpiresAt != null && accountExpiresAt > accountCreatedAt) {
-                SubscriptionProgressBar(createdAtEpochSeconds = accountCreatedAt, expiresAtEpochSeconds = accountExpiresAt)
-            }
-        }
+        SearchKpiRow(
+            liveCount = syncedLiveCount,
+            seriesCount = syncedSeriesCount,
+            vodCount = syncedVodCount,
+            accountCreatedAt = accountCreatedAt,
+            accountExpiresAt = accountExpiresAt
+        )
 
         // §6.4 - full-width pill search field only, no mic/settings icon.
         SearchField(
@@ -320,18 +314,23 @@ fun SearchScreen(
         }
 
         when (syncState) {
-            is LoadState.Loading -> Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically
+            is LoadState.Loading -> Box(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentAlignment = Alignment.Center
             ) {
-                PhoneMaterialTheme(colorScheme = phoneDarkColorScheme()) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PhoneMaterialTheme(colorScheme = phoneDarkColorScheme()) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    }
+                    Text(
+                        text = "Preparing search - indexed $syncedLiveCount channels, " +
+                            "$syncedVodCount movies, $syncedSeriesCount shows so far...",
+                        color = onBackground
+                    )
                 }
-                Text(
-                    text = "Preparing search - indexed $syncedLiveCount channels, " +
-                        "$syncedVodCount movies, $syncedSeriesCount shows so far...",
-                    color = onBackground
-                )
             }
             is LoadState.Error -> Text(text = "Could not load channels: ${syncState.message}", color = onBackground)
             is LoadState.Success -> {
@@ -439,7 +438,7 @@ private fun SearchField(
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .background(appColors.surfaceContainerLow, fieldShape)
             .border(FocusDefaults.OutlineWidth, borderColor, fieldShape)
-            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .padding(horizontal = 20.dp, vertical = 20.dp)
     ) {
         Icon(
             imageVector = RailIcons.Search,
@@ -511,83 +510,115 @@ private fun HistoryPill(term: String, onClick: () -> Unit, modifier: Modifier = 
     }
 }
 
-// App-defined - three catalog-size stat tiles above the search field, not
+// App-defined - four catalog/account stat tiles above the search field, not
 // from the reference mockups. Static/display-only (not focusable): they're
-// informational, not another D-pad stop between the rail and the field.
+// informational, not another D-pad stop between the rail and the field. The
+// expiration tile replaces what used to be a separate progress-bar row
+// below this one - same shape as the count tiles, just with a date instead
+// of a number, so all four read as one consistent strip.
 @Composable
-private fun SearchKpiRow(liveCount: Int, seriesCount: Int, vodCount: Int) {
+private fun SearchKpiRow(
+    liveCount: Int,
+    seriesCount: Int,
+    vodCount: Int,
+    accountCreatedAt: Long?,
+    accountExpiresAt: Long?
+) {
+    // IntrinsicSize.Max + fillMaxHeight on every tile forces all 4 to the
+    // same height regardless of content - without this, the Expires tile's
+    // smaller date font (vs. the titleLarge counts) made its Column shrink
+    // to a shorter intrinsic height than the other three, so the cards read
+    // as different shapes even though they share the same corner radius.
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        SearchKpiTile(count = liveCount, label = "Live Channels", modifier = Modifier.weight(1f))
-        SearchKpiTile(count = seriesCount, label = "TV Shows", modifier = Modifier.weight(1f))
-        SearchKpiTile(count = vodCount, label = "Movies", modifier = Modifier.weight(1f))
+        SearchKpiTile(value = liveCount.toString(), label = "Live Channels", modifier = Modifier.weight(1f).fillMaxHeight())
+        SearchKpiTile(value = seriesCount.toString(), label = "TV Shows", modifier = Modifier.weight(1f).fillMaxHeight())
+        SearchKpiTile(value = vodCount.toString(), label = "Movies", modifier = Modifier.weight(1f).fillMaxHeight())
+        // Some providers omit exp_date entirely for lifetime accounts -
+        // there's nothing meaningful to show without one.
+        if (accountExpiresAt != null) {
+            val expiresLabel = remember(accountExpiresAt) {
+                SimpleDateFormat("dd/MM/yyyy", Locale.US).format(Date(accountExpiresAt * 1000))
+            }
+            // Elapsed fraction of the subscription, same math the old
+            // standalone progress bar used - only meaningful when both
+            // dates are present and in the right order (lifetime accounts
+            // often have no created_at at all).
+            val progressFraction = if (accountCreatedAt != null && accountExpiresAt > accountCreatedAt) {
+                val nowSeconds = remember { System.currentTimeMillis() / 1000 }
+                ((nowSeconds - accountCreatedAt).toFloat() / (accountExpiresAt - accountCreatedAt).toFloat())
+                    .coerceIn(0f, 1f)
+            } else {
+                null
+            }
+            SearchKpiTile(
+                value = expiresLabel,
+                label = "Expires",
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                valueStyle = MaterialTheme.typography.titleMedium,
+                progressFraction = progressFraction
+            )
+        }
     }
 }
 
 @Composable
-private fun SearchKpiTile(count: Int, label: String, modifier: Modifier = Modifier) {
+private fun SearchKpiTile(
+    value: String,
+    label: String,
+    modifier: Modifier = Modifier,
+    valueStyle: TextStyle = MaterialTheme.typography.titleLarge,
+    progressFraction: Float? = null
+) {
+    val tileShape = RoundedCornerShape(10.dp)
+    val appColors = LocalAppColors.current
     Column(
         modifier = modifier
-            .background(LocalAppColors.current.surfaceContainer, RoundedCornerShape(10.dp))
+            .clip(tileShape)
+            .background(appColors.surfaceContainer)
             .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp)
+        // Centered rather than top-aligned: the 3 count tiles are now
+        // stretched to match the (taller) Expires tile's height, and
+        // centering their 2 lines of text in that extra space reads better
+        // than leaving empty space pinned to the bottom.
+        verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.CenterVertically)
     ) {
         Text(
-            text = count.toString(),
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.primary
+            text = value,
+            style = valueStyle,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
         )
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-    }
-}
-
-// App-defined, not from the reference mockups - a thin subscription-elapsed
-// indicator between the KPI row and the search field. Elapsed fraction is
-// (now - createdAt) / (expiresAt - createdAt), clamped to [0, 1] since the
-// account may already be past its expiration date. Reuses the vivid-accent
-// green already established as this app's one "progress" color (§6.1
-// player scrub bar, §6.6 in-progress poster indicator) rather than
-// inventing a second progress color.
-@Composable
-private fun SubscriptionProgressBar(createdAtEpochSeconds: Long, expiresAtEpochSeconds: Long) {
-    val nowSeconds = remember { System.currentTimeMillis() / 1000 }
-    val fraction = ((nowSeconds - createdAtEpochSeconds).toFloat() / (expiresAtEpochSeconds - createdAtEpochSeconds).toFloat())
-        .coerceIn(0f, 1f)
-    val expiresLabel = remember(expiresAtEpochSeconds) {
-        SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(expiresAtEpochSeconds * 1000))
-    }
-    val appColors = LocalAppColors.current
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(4.dp)
-                .clip(RoundedCornerShape(50))
-                .background(appColors.surfaceContainer)
-        ) {
+        // Small ratio indicator instead of tinting the whole card - keeps
+        // this tile's background identical to the other three, only this
+        // thin bar communicates how far through the subscription period
+        // the account is.
+        if (progressFraction != null) {
+            val trackShape = RoundedCornerShape(50)
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(fraction)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(50))
-                    .background(appColors.vividAccent)
-            )
+                    .padding(top = 6.dp)
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(trackShape)
+                    .background(appColors.surfaceContainerHigh)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progressFraction)
+                        .clip(trackShape)
+                        .background(appColors.vividAccent)
+                )
+            }
         }
-        Text(
-            text = "Expires $expiresLabel",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }

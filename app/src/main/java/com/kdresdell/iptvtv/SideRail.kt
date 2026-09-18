@@ -32,6 +32,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.input.key.Key
@@ -101,41 +103,75 @@ fun SideRail(
     // the content pane next to it - a real bug hit on real hardware where
     // Down from a rail item sometimes landed on a channel card instead of
     // the next rail item.
-    Column(
-        modifier = Modifier
-            .fillMaxHeight()
-            .width(160.dp)
-            .background(appColors.surfaceContainerLow)
-            .padding(vertical = 24.dp, horizontal = 8.dp)
-            .focusGroup(),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Image(
-            painter = painterResource(R.drawable.app_logo),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(80.dp)
-                .clip(CircleShape)
-                .border(2.dp, MaterialTheme.colorScheme.border, CircleShape)
-        )
-        Spacer(modifier = Modifier.padding(top = 20.dp))
+    Row(modifier = Modifier.fillMaxHeight()) {
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .fillMaxHeight()
+                // Widened from 160dp so the extra left/right padding below is
+                // real breathing room, not a shrink of the item pills - content
+                // width (176 - 2*16 = 144dp) matches the original 160dp rail's
+                // content width exactly, so labels like "My Librairie" still
+                // fit on one line. Explicit user request (2026-09-17): the
+                // focus pill was touching the rail edges with barely any gap.
+                .width(176.dp)
+                .background(appColors.surfaceContainerLow)
+                .padding(vertical = 24.dp, horizontal = 16.dp)
+                .focusGroup(),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            listOf(RailItem.Search, RailItem.MyChannel, RailItem.MyVod, RailItem.Categories).forEachIndexed { index, item ->
-                RailRow(
-                    item = item,
-                    selected = selected,
-                    onSelect = onSelect,
-                    modifier = if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier
-                )
+            Image(
+                painter = painterResource(R.drawable.app_logo),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    // -10% from 80dp, explicit user request (2026-09-17).
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, MaterialTheme.colorScheme.border, CircleShape)
+            )
+            Spacer(modifier = Modifier.padding(top = 20.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                listOf(RailItem.Search, RailItem.MyChannel, RailItem.MyVod, RailItem.Categories).forEachIndexed { index, item ->
+                    RailRow(
+                        item = item,
+                        selected = selected,
+                        onSelect = onSelect,
+                        modifier = if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier
+                    )
+                }
             }
+            Spacer(modifier = Modifier.weight(1f))
+            RailRow(item = RailItem.Help, selected = selected, onSelect = onSelect)
+            RailRow(item = RailItem.Settings, selected = selected, onSelect = onSelect, showAlert = hasSettingsAlert)
         }
-        Spacer(modifier = Modifier.weight(1f))
-        RailRow(item = RailItem.Help, selected = selected, onSelect = onSelect)
-        RailRow(item = RailItem.Settings, selected = selected, onSelect = onSelect, showAlert = hasSettingsAlert)
+        // A physically-simulated elevation shadow (tried first) was barely
+        // visible against bright video - confirmed on real hardware
+        // (2026-09-17). Real overlay panels on video (YouTube, Netflix) use
+        // an explicit gradient scrim instead, which reads clearly regardless
+        // of what's playing behind it. Drawn as its own strip rather than a
+        // shadow modifier so opacity/width are under direct control.
+        // Narrowed and darkened - explicit user request (2026-09-17): the
+        // first version (28dp, linear fade from 60% alpha) read as too wide
+        // and too washed-out on real hardware. Front-loading the opacity
+        // (most of the darkness in the first third, not a plain linear
+        // fade) keeps it looking like a deliberate edge, not a haze.
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(16.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        colorStops = arrayOf(
+                            0.0f to Color.Black.copy(alpha = 0.85f),
+                            0.4f to Color.Black.copy(alpha = 0.45f),
+                            1.0f to Color.Transparent
+                        )
+                    )
+                )
+        )
     }
 }
 
@@ -203,7 +239,9 @@ private fun RailRow(
 // per explicit direction, it should disappear entirely rather than collapse
 // to an icon strip. It stays laid out (just translated off-canvas) so
 // Compose's directional focus search can still find it from a Left press.
-private val HiddenRailOffset = (-200).dp
+// Rail is 176dp + a 28dp gradient scrim strip = 204dp total - offset must
+// clear that fully or a sliver of the scrim peeks in from the left edge.
+private val HiddenRailOffset = (-210).dp
 
 @Composable
 fun WithRail(

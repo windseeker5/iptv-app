@@ -4,6 +4,20 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import java.text.Normalizer
+
+// Search needs to match "elections" against a stored "Élections" and
+// "ncaa hockey" against "Hockey - NCAA Men's" - plain SQLite
+// `LIKE ... COLLATE NOCASE` only folds ASCII case, it does not fold
+// accents, and a raw multi-word query is one contiguous substring, not an
+// AND of its words. NFD-decomposing and stripping combining marks (the
+// diacritics) before lowercasing turns "Élections" into "elections", and
+// the same normalization is applied to the query at search time so both
+// sides compare on equal footing.
+private fun normalizeForSearch(text: String): String =
+    Normalizer.normalize(text, Normalizer.Form.NFD)
+        .replace(Regex("\\p{Mn}+"), "")
+        .lowercase()
 
 // Local cache of the full live-channel catalog. Search needs this because
 // a real provider's catalog can be huge (tens of thousands of channels) -
@@ -11,7 +25,7 @@ import android.database.sqlite.SQLiteOpenHelper
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 8) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 10) {
 
     init {
         // WAL mode lets concurrent readers proceed without blocking behind
@@ -62,6 +76,54 @@ class LiveChannelDatabase(context: Context) :
             createVodDetailsTable(db)
             createSeriesDetailsTables(db)
         }
+        if (oldVersion < 9) {
+            db.execSQL("ALTER TABLE live_channels ADD COLUMN name_normalized TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE vod_streams ADD COLUMN name_normalized TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE series ADD COLUMN name_normalized TEXT NOT NULL DEFAULT ''")
+            // The catalog only re-syncs from the network when its table is
+            // empty (see MainActivity's isEmpty()/isVodEmpty()/isSeriesEmpty()
+            // checks) - on an upgrade the tables are already full, so that
+            // sync never runs and every row would be stuck with the blank
+            // default above (search would return nothing for anyone
+            // upgrading in place). Backfill in SQL from the name already on
+            // disk instead of waiting for a resync.
+            backfillNormalizedNames(db, "live_channels", "stream_id")
+            backfillNormalizedNames(db, "vod_streams", "stream_id")
+            backfillNormalizedNames(db, "series", "series_id")
+        }
+        if (oldVersion < 10) {
+            // v9 shipped without this backfill on some installs (this
+            // device included) - re-run it unconditionally so name_normalized
+            // is never left blank regardless of which version an install is
+            // coming from.
+            backfillNormalizedNames(db, "live_channels", "stream_id")
+            backfillNormalizedNames(db, "vod_streams", "stream_id")
+            backfillNormalizedNames(db, "series", "series_id")
+        }
+    }
+
+    // Without an explicit transaction, SQLite commits (fsyncs) after every
+    // single UPDATE - confirmed on real hardware (2026-09-17) that this
+    // made backfilling ~190k rows across the three tables grind for
+    // minutes, indistinguishable from a hang. Wrapping the whole backfill
+    // in one transaction is the same fix replaceAll()/replaceAllVod()/
+    // replaceAllSeries() already use for their bulk inserts.
+    private fun backfillNormalizedNames(db: SQLiteDatabase, table: String, idColumn: String) {
+        db.beginTransaction()
+        try {
+            val updateStatement = db.compileStatement("UPDATE $table SET name_normalized = ? WHERE $idColumn = ?")
+            db.rawQuery("SELECT $idColumn, name FROM $table", null).use { cursor ->
+                while (cursor.moveToNext()) {
+                    updateStatement.clearBindings()
+                    updateStatement.bindString(1, normalizeForSearch(cursor.getString(1)))
+                    updateStatement.bindLong(2, cursor.getLong(0))
+                    updateStatement.executeUpdateDelete()
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     private fun createLiveChannelsTable(db: SQLiteDatabase) {
@@ -71,7 +133,8 @@ class LiveChannelDatabase(context: Context) :
                 stream_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 category_id TEXT NOT NULL,
-                stream_icon TEXT NOT NULL DEFAULT ''
+                stream_icon TEXT NOT NULL DEFAULT '',
+                name_normalized TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -85,7 +148,8 @@ class LiveChannelDatabase(context: Context) :
                 name TEXT NOT NULL,
                 category_id TEXT NOT NULL,
                 stream_icon TEXT NOT NULL DEFAULT '',
-                container_extension TEXT NOT NULL DEFAULT 'mp4'
+                container_extension TEXT NOT NULL DEFAULT 'mp4',
+                name_normalized TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -98,7 +162,8 @@ class LiveChannelDatabase(context: Context) :
                 series_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 category_id TEXT NOT NULL,
-                cover TEXT NOT NULL DEFAULT ''
+                cover TEXT NOT NULL DEFAULT '',
+                name_normalized TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -413,7 +478,7 @@ class LiveChannelDatabase(context: Context) :
         try {
             db.execSQL("DELETE FROM live_channels")
             val statement = db.compileStatement(
-                "INSERT OR REPLACE INTO live_channels (stream_id, name, category_id, stream_icon) VALUES (?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO live_channels (stream_id, name, category_id, stream_icon, name_normalized) VALUES (?, ?, ?, ?, ?)"
             )
             var count = 0
             for (channel in channels) {
@@ -422,6 +487,7 @@ class LiveChannelDatabase(context: Context) :
                 statement.bindString(2, channel.name)
                 statement.bindString(3, channel.categoryId)
                 statement.bindString(4, channel.streamIcon)
+                statement.bindString(5, normalizeForSearch(channel.name))
                 statement.executeInsert()
                 count++
                 if (count % 250 == 0) {
@@ -443,7 +509,7 @@ class LiveChannelDatabase(context: Context) :
         try {
             db.execSQL("DELETE FROM vod_streams")
             val statement = db.compileStatement(
-                "INSERT OR REPLACE INTO vod_streams (stream_id, name, category_id, stream_icon, container_extension) VALUES (?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO vod_streams (stream_id, name, category_id, stream_icon, container_extension, name_normalized) VALUES (?, ?, ?, ?, ?, ?)"
             )
             var count = 0
             for (stream in streams) {
@@ -453,6 +519,7 @@ class LiveChannelDatabase(context: Context) :
                 statement.bindString(3, stream.categoryId)
                 statement.bindString(4, stream.streamIcon)
                 statement.bindString(5, stream.containerExtension)
+                statement.bindString(6, normalizeForSearch(stream.name))
                 statement.executeInsert()
                 count++
                 if (count % 250 == 0) {
@@ -474,7 +541,7 @@ class LiveChannelDatabase(context: Context) :
         try {
             db.execSQL("DELETE FROM series")
             val statement = db.compileStatement(
-                "INSERT OR REPLACE INTO series (series_id, name, category_id, cover) VALUES (?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO series (series_id, name, category_id, cover, name_normalized) VALUES (?, ?, ?, ?, ?)"
             )
             var count = 0
             for (show in series) {
@@ -483,6 +550,7 @@ class LiveChannelDatabase(context: Context) :
                 statement.bindString(2, show.name)
                 statement.bindString(3, show.categoryId)
                 statement.bindString(4, show.cover)
+                statement.bindString(5, normalizeForSearch(show.name))
                 statement.executeInsert()
                 count++
                 if (count % 250 == 0) {
@@ -497,12 +565,22 @@ class LiveChannelDatabase(context: Context) :
     }
 
     // Searches all three indexes and returns a combined, type-tagged
-    // result list - live channels, then VOD movies, then series.
+    // result list - live channels, then VOD movies, then series. Each
+    // whitespace-separated word in the query is its own AND'd condition
+    // against the accent/case-folded name_normalized column, so "ncaa
+    // hockey" matches "Hockey - NCAA Men's Division" (both words present,
+    // any order, any position) rather than requiring that exact contiguous
+    // phrase - and "elections" matches a stored "Élections" the same way.
     fun searchAll(query: String, limit: Int = 100): List<SearchResult> {
+        val tokens = normalizeForSearch(query).split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return emptyList()
+        val whereClause = tokens.joinToString(" AND ") { "name_normalized LIKE ?" }
+        val tokenArgs = tokens.map { "%$it%" }
+
         val results = mutableListOf<SearchResult>()
         readableDatabase.rawQuery(
-            "SELECT stream_id, name, category_id, stream_icon FROM live_channels WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
-            arrayOf("%$query%", limit.toString())
+            "SELECT stream_id, name, category_id, stream_icon FROM live_channels WHERE $whereClause LIMIT ?",
+            (tokenArgs + limit.toString()).toTypedArray()
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results.add(
@@ -518,8 +596,8 @@ class LiveChannelDatabase(context: Context) :
             }
         }
         readableDatabase.rawQuery(
-            "SELECT stream_id, name, category_id, stream_icon, container_extension FROM vod_streams WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
-            arrayOf("%$query%", limit.toString())
+            "SELECT stream_id, name, category_id, stream_icon, container_extension FROM vod_streams WHERE $whereClause LIMIT ?",
+            (tokenArgs + limit.toString()).toTypedArray()
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results.add(
@@ -536,8 +614,8 @@ class LiveChannelDatabase(context: Context) :
             }
         }
         readableDatabase.rawQuery(
-            "SELECT series_id, name, category_id, cover FROM series WHERE name LIKE ? COLLATE NOCASE LIMIT ?",
-            arrayOf("%$query%", limit.toString())
+            "SELECT series_id, name, category_id, cover FROM series WHERE $whereClause LIMIT ?",
+            (tokenArgs + limit.toString()).toTypedArray()
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 results.add(
