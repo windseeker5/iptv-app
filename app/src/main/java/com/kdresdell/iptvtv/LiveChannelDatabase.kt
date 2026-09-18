@@ -1,6 +1,5 @@
 package com.kdresdell.iptvtv
 
-import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
@@ -25,7 +24,7 @@ private fun normalizeForSearch(text: String): String =
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 10) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 11) {
 
     init {
         // WAL mode lets concurrent readers proceed without blocking behind
@@ -43,23 +42,15 @@ class LiveChannelDatabase(context: Context) :
 
     override fun onCreate(db: SQLiteDatabase) {
         createLiveChannelsTable(db)
-        createEpgTable(db)
         createVodStreamsTable(db)
         createSeriesTable(db)
         createEpgWindowTable(db)
+        createEpgSyncTables(db)
         createVodDetailsTable(db)
         createSeriesDetailsTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 2) {
-            createEpgTable(db)
-        }
-        if (oldVersion < 3) {
-            // Cache-only data, safe to drop and let it repopulate.
-            db.execSQL("DROP TABLE IF EXISTS channel_epg")
-            createEpgTable(db)
-        }
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE live_channels ADD COLUMN stream_icon TEXT NOT NULL DEFAULT ''")
         }
@@ -99,6 +90,15 @@ class LiveChannelDatabase(context: Context) :
             backfillNormalizedNames(db, "live_channels", "stream_id")
             backfillNormalizedNames(db, "vod_streams", "stream_id")
             backfillNormalizedNames(db, "series", "series_id")
+        }
+        if (oldVersion < 11) {
+            // Everything cached so far came from get_short_epg /
+            // get_simple_data_table, which this provider serves 2h late
+            // (see XtreamApi.fetchXmltvPrograms) - drop it all rather than
+            // keep showing wrong times until it expires. Cache-only data.
+            db.execSQL("DROP TABLE IF EXISTS channel_epg")
+            db.execSQL("DELETE FROM channel_epg_window")
+            createEpgSyncTables(db)
         }
     }
 
@@ -169,25 +169,9 @@ class LiveChannelDatabase(context: Context) :
         )
     }
 
-    private fun createEpgTable(db: SQLiteDatabase) {
-        db.execSQL(
-            """
-            CREATE TABLE IF NOT EXISTS channel_epg (
-                stream_id INTEGER PRIMARY KEY,
-                now_playing_title TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                start_epoch INTEGER,
-                stop_epoch INTEGER,
-                fetched_at INTEGER NOT NULL
-            )
-            """.trimIndent()
-        )
-    }
-
-    // Multi-program window per channel, for the My TV guide's EPG timeline
-    // grid (STYLE_GUIDE.md §6.3) - separate from channel_epg above, which
-    // only ever holds a single "what's on right now" row for the simpler
-    // "Now: <title>" subtitle used elsewhere (Search, channel lists).
+    // Multi-program window per channel: the one guide cache, read by the My
+    // TV grid, the player overlay and Search's "Now:" line (STYLE_GUIDE.md
+    // §6.3). Filled only by EpgSync, from xmltv.php.
     private fun createEpgWindowTable(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -204,25 +188,56 @@ class LiveChannelDatabase(context: Context) :
         )
     }
 
-    fun setEpgWindow(streamId: Int, programs: List<EpgProgram>) {
+    // Guide sync bookkeeping (see EpgSync). The guide is downloaded for whole
+    // categories - the ones favorites/played channels belong to - because
+    // one small get_live_streams call per category gives every channel's
+    // epg_channel_id, and it lets channel surfing and Search find guide
+    // data without another 74MB download.
+    private fun createEpgSyncTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS epg_categories (
+                category_id TEXT PRIMARY KEY,
+                synced_at INTEGER NOT NULL DEFAULT 0,
+                requested_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS channel_epg_ids (
+                stream_id INTEGER PRIMARY KEY,
+                category_id TEXT NOT NULL,
+                epg_channel_id TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+    }
+
+    // Replaces the cached programs of every given channel in ONE
+    // transaction (a per-channel transaction each meant an fsync per
+    // channel - see backfillNormalizedNames for why that matters here).
+    fun setEpgWindows(windows: Map<Int, List<EpgProgram>>) {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete("channel_epg_window", "stream_id = ?", arrayOf(streamId.toString()))
             val statement = db.compileStatement(
                 "INSERT OR REPLACE INTO channel_epg_window " +
                     "(stream_id, start_epoch, stop_epoch, title, description, fetched_at) VALUES (?, ?, ?, ?, ?, ?)"
             )
             val fetchedAt = System.currentTimeMillis()
-            programs.forEach { program ->
-                statement.clearBindings()
-                statement.bindLong(1, streamId.toLong())
-                statement.bindLong(2, program.startEpochSeconds)
-                statement.bindLong(3, program.stopEpochSeconds)
-                statement.bindString(4, program.title)
-                statement.bindString(5, program.description)
-                statement.bindLong(6, fetchedAt)
-                statement.executeInsert()
+            windows.forEach { (streamId, programs) ->
+                db.delete("channel_epg_window", "stream_id = ?", arrayOf(streamId.toString()))
+                programs.forEach { program ->
+                    statement.clearBindings()
+                    statement.bindLong(1, streamId.toLong())
+                    statement.bindLong(2, program.startEpochSeconds)
+                    statement.bindLong(3, program.stopEpochSeconds)
+                    statement.bindString(4, program.title)
+                    statement.bindString(5, program.description)
+                    statement.bindLong(6, fetchedAt)
+                    statement.executeInsert()
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -251,13 +266,120 @@ class LiveChannelDatabase(context: Context) :
         return results
     }
 
-    fun isEpgWindowStale(streamId: Int, maxAgeMillis: Long): Boolean {
+    // Marks these categories as wanted right now (inserting unseen ones as
+    // never-synced), so they are kept fresh by every later sync too.
+    fun touchEpgCategories(categoryIds: Collection<String>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val now = System.currentTimeMillis()
+            categoryIds.forEach { id ->
+                db.execSQL(
+                    "INSERT OR IGNORE INTO epg_categories (category_id, synced_at, requested_at) VALUES (?, 0, ?)",
+                    arrayOf(id, now)
+                )
+                db.execSQL("UPDATE epg_categories SET requested_at = ? WHERE category_id = ?", arrayOf(now, id))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun staleEpgCategories(categoryIds: Collection<String>, maxAgeMillis: Long): List<String> {
+        val cutoff = System.currentTimeMillis() - maxAgeMillis
+        return categoryIds.filter { id ->
+            readableDatabase.rawQuery(
+                "SELECT synced_at FROM epg_categories WHERE category_id = ?",
+                arrayOf(id)
+            ).use { cursor -> !cursor.moveToFirst() || cursor.getLong(0) < cutoff }
+        }
+    }
+
+    fun activeEpgCategories(requestedWithinMillis: Long): List<String> {
+        val cutoff = System.currentTimeMillis() - requestedWithinMillis
+        val result = mutableListOf<String>()
         readableDatabase.rawQuery(
-            "SELECT MAX(fetched_at) FROM channel_epg_window WHERE stream_id = ?",
-            arrayOf(streamId.toString())
-        ).use { cursor ->
-            if (!cursor.moveToFirst() || cursor.isNull(0)) return true
-            return System.currentTimeMillis() - cursor.getLong(0) > maxAgeMillis
+            "SELECT category_id FROM epg_categories WHERE requested_at >= ?",
+            arrayOf(cutoff.toString())
+        ).use { cursor -> while (cursor.moveToNext()) result.add(cursor.getString(0)) }
+        return result
+    }
+
+    fun replaceEpgChannelIds(categoryId: String, ids: Map<Int, String>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("channel_epg_ids", "category_id = ?", arrayOf(categoryId))
+            val statement = db.compileStatement(
+                "INSERT OR REPLACE INTO channel_epg_ids (stream_id, category_id, epg_channel_id) VALUES (?, ?, ?)"
+            )
+            ids.forEach { (streamId, epgId) ->
+                statement.clearBindings()
+                statement.bindLong(1, streamId.toLong())
+                statement.bindString(2, categoryId)
+                statement.bindString(3, epgId)
+                statement.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // epg_channel_id -> every stream_id sharing it (HD/SD variants of one
+    // channel share one guide entry).
+    fun streamIdsByEpgChannelId(categoryIds: Collection<String>): Map<String, List<Int>> {
+        val result = HashMap<String, MutableList<Int>>()
+        categoryIds.forEach { id ->
+            readableDatabase.rawQuery(
+                "SELECT epg_channel_id, stream_id FROM channel_epg_ids WHERE category_id = ?",
+                arrayOf(id)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.getOrPut(cursor.getString(0)) { mutableListOf() }.add(cursor.getInt(1))
+                }
+            }
+        }
+        return result
+    }
+
+    fun markEpgCategoriesSynced(categoryIds: Collection<String>) {
+        val now = System.currentTimeMillis()
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            categoryIds.forEach { id ->
+                db.execSQL("UPDATE epg_categories SET synced_at = ? WHERE category_id = ?", arrayOf(now, id))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // Categories nobody asked for in a while stop being refreshed and are
+    // dropped, so browsing around once doesn't grow the sync forever.
+    fun pruneEpg(requestedWithinMillis: Long) {
+        val cutoff = (System.currentTimeMillis() - requestedWithinMillis).toString()
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val args = arrayOf(cutoff)
+            db.execSQL(
+                "DELETE FROM channel_epg_window WHERE stream_id IN (SELECT stream_id FROM channel_epg_ids " +
+                    "WHERE category_id IN (SELECT category_id FROM epg_categories WHERE requested_at < ?))",
+                args
+            )
+            db.execSQL(
+                "DELETE FROM channel_epg_ids WHERE category_id IN " +
+                    "(SELECT category_id FROM epg_categories WHERE requested_at < ?)",
+                args
+            )
+            db.execSQL("DELETE FROM epg_categories WHERE requested_at < ?", args)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 
@@ -389,46 +511,17 @@ class LiveChannelDatabase(context: Context) :
         }
     }
 
-    // Only ever called for favorited channels (a handful, not the whole
-    // catalog) so a plain per-channel fetch/cache is fine here - this is
-    // deliberately not the same "index everything" approach search needed.
+    // What's on right now, read from the same guide cache the My TV grid and
+    // the player use - so Search can never disagree with them, and never
+    // makes its own network call. Null when this channel's category isn't
+    // synced (see EpgSync) or nothing is airing.
     fun getCachedNowPlaying(streamId: Int): NowPlayingInfo? {
-        readableDatabase.rawQuery(
-            "SELECT now_playing_title, description, start_epoch, stop_epoch FROM channel_epg WHERE stream_id = ?",
-            arrayOf(streamId.toString())
-        ).use { cursor ->
-            if (!cursor.moveToFirst()) return null
-            return NowPlayingInfo(
-                title = cursor.getString(0),
-                description = cursor.getString(1),
-                startEpochSeconds = if (cursor.isNull(2)) null else cursor.getLong(2),
-                stopEpochSeconds = if (cursor.isNull(3)) null else cursor.getLong(3)
-            )
-        }
-    }
-
-    fun isEpgStale(streamId: Int, maxAgeMillis: Long): Boolean {
-        readableDatabase.rawQuery(
-            "SELECT fetched_at FROM channel_epg WHERE stream_id = ?",
-            arrayOf(streamId.toString())
-        ).use { cursor ->
-            if (!cursor.moveToFirst()) return true
-            val fetchedAt = cursor.getLong(0)
-            return System.currentTimeMillis() - fetchedAt > maxAgeMillis
-        }
-    }
-
-    fun setNowPlaying(streamId: Int, info: NowPlayingInfo) {
-        val values = ContentValues().apply {
-            put("stream_id", streamId)
-            put("now_playing_title", info.title)
-            put("description", info.description)
-            if (info.startEpochSeconds != null) put("start_epoch", info.startEpochSeconds) else putNull("start_epoch")
-            if (info.stopEpochSeconds != null) put("stop_epoch", info.stopEpochSeconds) else putNull("stop_epoch")
-            put("fetched_at", System.currentTimeMillis())
-        }
-        writableDatabase.insertWithOnConflict(
-            "channel_epg", null, values, SQLiteDatabase.CONFLICT_REPLACE
+        val current = XtreamApi.currentAndNextFrom(getCachedEpgWindow(streamId)).first ?: return null
+        return NowPlayingInfo(
+            title = current.title,
+            description = current.description,
+            startEpochSeconds = current.startEpochSeconds,
+            stopEpochSeconds = current.stopEpochSeconds
         )
     }
 

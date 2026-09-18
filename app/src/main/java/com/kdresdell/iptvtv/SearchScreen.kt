@@ -104,10 +104,7 @@ fun SearchScreen(
     onToggleSeriesSaved: (SeriesShow) -> Unit,
     defaultStreamId: Int?,
     onSetDefault: (LiveChannel) -> Unit,
-    getCachedNowPlaying: (Int) -> NowPlayingInfo?,
-    isEpgStale: (Int) -> Boolean,
-    onFetchNowPlaying: suspend (Int) -> NowPlayingInfo?,
-    onCacheNowPlaying: (Int, NowPlayingInfo) -> Unit
+    getCachedNowPlaying: (Int) -> NowPlayingInfo?
 ) {
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
@@ -141,26 +138,15 @@ fun SearchScreen(
         isSearching = false
     }
 
-    // Same shortlist-only EPG pattern as Favorites (see MainActivity.kt's
-    // Screen.Favorites branch): only the live channels currently visible in
-    // results get a get_short_epg call, never the whole catalog.
+    // "Now:" comes from the guide cache only - no network call here, so
+    // typing in Search never waits on the provider. Channels whose category
+    // hasn't been synced (see EpgSync) simply show no "Now:" line.
     LaunchedEffect(results) {
         val liveChannels = results.filterIsInstance<SearchResult.Live>().map { it.channel }
-        val cached = withContext(Dispatchers.IO) {
+        nowPlaying = withContext(Dispatchers.IO) {
             liveChannels.mapNotNull { channel ->
                 getCachedNowPlaying(channel.streamId)?.let { channel.streamId to it }
             }.toMap()
-        }
-        nowPlaying = cached
-        liveChannels.forEach { channel ->
-            val stale = withContext(Dispatchers.IO) { isEpgStale(channel.streamId) }
-            if (stale) {
-                val info = onFetchNowPlaying(channel.streamId)
-                if (info != null) {
-                    withContext(Dispatchers.IO) { onCacheNowPlaying(channel.streamId, info) }
-                    nowPlaying = nowPlaying + (channel.streamId to info)
-                }
-            }
         }
     }
 

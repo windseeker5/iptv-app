@@ -26,11 +26,21 @@ Python and this one is Kotlin, but the API shape is identical.
 - `action=get_short_epg&stream_id=<id>&limit=<n>` → short EPG (`epg_listings`)
 - `action=get_simple_data_table&stream_id=<id>&limit=<n>` → fallback EPG,
   same shape, sometimes base64-encoded title/description
+- **Do not use either EPG action for times on the current provider**: both
+  return timestamps exactly +2h late (verified 2026-09-18 against real
+  schedules). Use `xmltv.php` below instead. `get_live_streams` entries carry
+  `epg_channel_id`, the key that links a channel to its `xmltv.php` entries
+  (blank for some channels - those have no guide).
 
 ## Bulk EPG
 
 `GET {server}/xmltv.php?username=..&password=..` → full XMLTV guide
-(standard `<programme channel= start= stop=><title>/<desc>`).
+(standard `<programme channel= start= stop=><title>/<desc>`). **This is the
+only EPG source with correct times**: each time carries an explicit UTC
+offset (`20260918235900 +0200`). ~74MB (~13MB gzipped), ~2 days ahead, all
+channels, no ETag/Last-Modified - so the app downloads it in the background
+(`EpgSync`), stream-parses it keeping only the wanted channels, and screens
+read the local `channel_epg_window` cache.
 
 ## Playback URLs (no API call, direct path)
 

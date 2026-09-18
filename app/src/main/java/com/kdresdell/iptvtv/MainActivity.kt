@@ -11,11 +11,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import kotlin.coroutines.cancellation.CancellationException
 import com.kdresdell.iptvtv.theme.IptvTvTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -138,6 +136,12 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi, channelDb: LiveChannelDa
     )
 }
 
+// How often the background guide refresh re-checks whether the cache is
+// stale (a cheap local query - it only downloads when something is), and how
+// long it waits after a failed download before trying again.
+private const val EPG_CHECK_INTERVAL_MILLIS = 60 * 60 * 1000L
+private const val EPG_RETRY_INTERVAL_MILLIS = 10 * 60 * 1000L
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -239,61 +243,40 @@ class MainActivity : ComponentActivity() {
 
             // Shared across both places that show the EPG timeline grid (the
             // My TV home screen and the OK-button info+guide overlay while
-            // watching live) so there's exactly one fetch/cache path, not
+            // watching live) so there's exactly one cache and one sync, not
             // two - and so the guide has fresh data no matter which of those
             // two screens is current when it's opened.
+            //
+            // Screens only ever read the local cache (instant); EpgSync
+            // fills it from the provider's xmltv.php in the background and
+            // does nothing at all while the cache is fresh. Kept off the
+            // critical path on purpose - the guide file is ~74MB, and this
+            // TV's CPU is shared with video decoding.
             val epgApi = remember(credentials) { XtreamApi(credentials) }
+            val epgSync = remember(credentials) { EpgSync(epgApi, channelDb) }
             var epgWindows by remember { mutableStateOf<Map<Int, List<EpgProgram>>>(emptyMap()) }
-            LaunchedEffect(favorites) {
-                val cached = withContext(Dispatchers.IO) {
+            LaunchedEffect(favorites, epgSync) {
+                suspend fun loadCache(): Map<Int, List<EpgProgram>> = withContext(Dispatchers.IO) {
                     favorites.associate { channel ->
                         channel.streamId to channelDb.getCachedEpgWindow(channel.streamId)
                     }
                 }
-                epgWindows = cached
-                // fetchEpgWindow (get_simple_data_table) returns ~1 week of
-                // programs per channel, not a short rolling window like the
-                // old get_short_epg-based call did - so one fetch per
-                // channel per day is enough to keep now/next accurate,
-                // versus the 30min cadence this used to need. Looping with a
-                // delay (rather than a one-shot check keyed only on
-                // `favorites`) still matters: real time keeps advancing past
-                // whatever was fetched, so the loop has to periodically
-                // refresh even if `favorites` itself never changes.
-                val maxAgeMillis = 24 * 60 * 60 * 1000L
+                epgWindows = loadCache()
+                // Let the first screen (and a default channel's video) come
+                // up before any background download starts competing for
+                // CPU and network.
+                delay(3_000L)
                 while (true) {
-                    // Fetched concurrently, not one-at-a-time - confirmed on
-                    // real hardware (2026-09-17) that a sequential
-                    // favorites.forEach here was the actual cause of both the
-                    // slow guide load and the "only one row highlighted" bug:
-                    // with 15-20 favorites, rows whose turn hadn't come up
-                    // yet just sat on the empty "No information" placeholder
-                    // for tens of seconds. Each channel's try/catch stays
-                    // inside its own async{} so one failing fetch can't
-                    // cancel the others.
-                    coroutineScope {
-                        favorites.map { channel ->
-                            async {
-                                val stale = withContext(Dispatchers.IO) {
-                                    channelDb.isEpgWindowStale(channel.streamId, maxAgeMillis)
-                                }
-                                if (stale) {
-                                    val programs = try {
-                                        epgApi.fetchEpgWindow(channel.streamId)
-                                    } catch (e: Exception) {
-                                        emptyList()
-                                    }
-                                    if (programs.isNotEmpty()) {
-                                        withContext(Dispatchers.IO) {
-                                            channelDb.setEpgWindow(channel.streamId, programs)
-                                        }
-                                        epgWindows = epgWindows + (channel.streamId to programs)
-                                    }
-                                }
-                            }
-                        }.awaitAll()
+                    val retryDelay = try {
+                        if (epgSync.refreshIfStale(favorites)) epgWindows = loadCache()
+                        EPG_CHECK_INTERVAL_MILLIS
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        AppLog.log("Guide refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                        EPG_RETRY_INTERVAL_MILLIS
                     }
-                    delay(maxAgeMillis)
+                    delay(retryDelay)
                 }
             }
 
@@ -482,16 +465,7 @@ class MainActivity : ComponentActivity() {
                             onToggleSeriesSaved = toggleSeriesSaved,
                             defaultStreamId = defaultStreamId,
                             onSetDefault = onSetDefault,
-                            getCachedNowPlaying = { id -> channelDb.getCachedNowPlaying(id) },
-                            isEpgStale = { id -> channelDb.isEpgStale(id, 24 * 60 * 60 * 1000L) },
-                            onFetchNowPlaying = { id ->
-                                try {
-                                    api.getNowPlayingInfo(id)
-                                } catch (e: Exception) {
-                                    null
-                                }
-                            },
-                            onCacheNowPlaying = { id, info -> channelDb.setNowPlaying(id, info) }
+                            getCachedNowPlaying = { id -> channelDb.getCachedNowPlaying(id) }
                         )
                     }
                 }
@@ -605,8 +579,16 @@ class MainActivity : ComponentActivity() {
                         streamUrl = params.streamUrl,
                         contentId = params.contentId,
                         isLive = params.isLive,
-                        api = api,
                         channelDb = channelDb,
+                        // Playing a channel from a category not synced yet
+                        // (e.g. browsed to, not a favorite) asks for its
+                        // guide in the background; rate-limited so zapping
+                        // through categories is one download, not many.
+                        ensureEpg = {
+                            (item as? PlayableItem.Live)?.let { live ->
+                                epgSync.refreshIfStale(listOf(live.channel), minGapMillis = 5 * 60 * 1000L)
+                            } ?: false
+                        },
                         subtitle = params.subtitle,
                         loadDetails = params.loadDetails,
                         onSelectRail = onSelectRail,

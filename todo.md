@@ -7,6 +7,7 @@ Working list of improvements and bugs to work through one at a time. For each it
 
 
 - [x] Retrieve/cache EPG info for My TV (concurrent fetch + get_simple_data_table + 24h SQLite cache, shared with player); cache VOD/series details on-demand; strip provider title prefixes (e.g. "CA FR:")
+- [x] Guide showed programs 2h late - root cause: the provider's per-channel EPG endpoints are shifted +2h, only `xmltv.php` is correct (verified against real schedules and TiViMate). Guide, player overlay and Search "Now:" now read a local cache filled in the background from xmltv.php (`EpgSync`); verified on the TV: "Un souper presque parfait" lands at 17:59, no extra frame drops while it downloads. Known gap: channels the provider gives no `epg_channel_id` (e.g. TVA SPORTS HD, SUPER ECRAN 2 HD) show "No information" - a name-matching fallback to XMLTV ids (`TVASports.ca`, `SuperEcran2.ca` exist) is possible if wanted
 - [x] My TV Guide: bug with info guide + prefix + timing — only 1 channel got a grey background (root cause: sequential EPG fetch loop)
 - [x] App icon doesn't look right on Fire TV (square instead of circle) — fix adaptive icon shape
 - [x] Improve menu cosmetics: smaller logo (-10%), left/right padding around items, narrow dark gradient scrim on the right edge (logo stays centered - confirmed fine as-is)

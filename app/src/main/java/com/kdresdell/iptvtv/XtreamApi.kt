@@ -1,15 +1,25 @@
 package com.kdresdell.iptvtv
 
-import android.util.Base64
+import android.os.Process
 import android.util.JsonReader
 import android.util.JsonToken
+import android.util.Xml
+import java.io.InputStream
 import java.net.URLEncoder
+import java.text.ParseException
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParser
 
 data class LiveCategory(val categoryId: String, val categoryName: String)
 data class LiveChannel(
@@ -429,69 +439,120 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
-    // Deliberately only called for a small shortlist (favorites), never
-    // the whole catalog - unlike get_live_streams, there's no cheap way
-    // to batch this across many channels, so it must stay opt-in per
-    // channel. Some providers base64-encode the title field.
-    suspend fun getNowPlayingInfo(streamId: Int): NowPlayingInfo? {
-        val body = getJson(playerApiUrl("get_short_epg", "&stream_id=$streamId&limit=1"))
+    // Every player_api.php EPG endpoint (get_short_epg, get_simple_data_table)
+    // returns times shifted +2h on this provider - verified 2026-09-18
+    // against real schedules and against TiViMate, which reads xmltv.php
+    // instead. xmltv.php is the only correct source: every time carries an
+    // explicit UTC offset ("20260918235900 +0200"), so nothing is guessed.
+    //
+    // It is one ~74MB file (~13MB gzipped, no ETag) covering every channel,
+    // so it must only ever run in the background (see EpgSync) and be
+    // filtered while streaming - never held whole in memory.
+    //
+    // Xtream links a channel to its guide entries through epg_channel_id,
+    // which get_live_streams returns per channel. Asked per category, that
+    // stays a small response (unlike the whole catalog).
+    suspend fun getEpgChannelIds(categoryId: String): Map<Int, String> {
+        val body = getJson(playerApiUrl("get_live_streams", "&category_id=${encode(categoryId)}"))
+        val array = parseArray(body, "Unexpected response listing channels")
+        val ids = HashMap<Int, String>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val epgId = obj.optString("epg_channel_id")
+            if (epgId.isNotBlank() && epgId != "null") ids[obj.optInt("stream_id")] = epgId
+        }
+        return ids
+    }
+
+    // Streams xmltv.php through a pull parser and keeps only the programmes
+    // of the wanted epg_channel_ids, so memory stays proportional to what
+    // the app shows, not to the provider's whole guide. Runs at background
+    // thread priority so it can't steal CPU from video decoding on this
+    // TV's weak SoC. Throws on any failure: a half-parsed file would look
+    // like "these channels have no guide" and must not overwrite the cache.
+    suspend fun fetchXmltvPrograms(wantedEpgIds: Set<String>): Map<String, List<EpgProgram>> =
+        withContext(Dispatchers.IO) {
+            val context = currentCoroutineContext()
+            val previousPriority = Process.getThreadPriority(Process.myTid())
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+            try {
+                val request = Request.Builder().url("${normalizedBaseUrl()}/xmltv.php?username=${encode(credentials.username)}&password=${encode(credentials.password)}").build()
+                // The server can go quiet for a while while it builds the
+                // file - the default 10s read timeout would kill it.
+                val xmltvClient = client.newBuilder().readTimeout(2, TimeUnit.MINUTES).build()
+                xmltvClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw XtreamApiException("Server returned HTTP ${response.code}")
+                    }
+                    val body = response.body ?: throw XtreamApiException("Empty response from server")
+                    parseXmltv(body.byteStream(), wantedEpgIds) { context.ensureActive() }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: XtreamApiException) {
+                throw e
+            } catch (e: Exception) {
+                throw XtreamApiException("Could not load guide: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                Process.setThreadPriority(previousPriority)
+            }
+        }
+
+    private fun parseXmltv(
+        input: InputStream,
+        wantedEpgIds: Set<String>,
+        checkCancelled: () -> Unit
+    ): Map<String, List<EpgProgram>> {
+        val parser = Xml.newPullParser()
+        parser.setInput(input, null)
+        val timeFormat = SimpleDateFormat("yyyyMMddHHmmss Z", Locale.US)
+        val programs = HashMap<String, MutableList<EpgProgram>>()
+        var seen = 0
+        var event = parser.eventType
+        while (event != XmlPullParser.END_DOCUMENT) {
+            if (event == XmlPullParser.START_TAG && parser.name == "programme") {
+                if ((++seen and 0x3FF) == 0) checkCancelled()
+                val channel = parser.getAttributeValue(null, "channel")
+                if (channel != null && channel in wantedEpgIds) {
+                    val start = parseXmltvTime(parser.getAttributeValue(null, "start"), timeFormat)
+                    val stop = parseXmltvTime(parser.getAttributeValue(null, "stop"), timeFormat)
+                    var title = ""
+                    var description = ""
+                    val depth = parser.depth
+                    while (true) {
+                        val inner = parser.next()
+                        if (inner == XmlPullParser.END_DOCUMENT) break
+                        if (inner == XmlPullParser.END_TAG && parser.depth == depth) break
+                        if (inner == XmlPullParser.START_TAG) {
+                            when (parser.name) {
+                                "title" -> parser.nextText().let { if (title.isEmpty()) title = it }
+                                "desc" -> parser.nextText().let { if (description.isEmpty()) description = it }
+                            }
+                        }
+                    }
+                    // Same rule as before: a program that can't be timed or
+                    // named can't be placed on the grid.
+                    if (start != null && stop != null && title.isNotBlank()) {
+                        programs.getOrPut(channel) { mutableListOf() }.add(EpgProgram(title, description, start, stop))
+                    }
+                }
+            }
+            event = parser.next()
+        }
+        return programs.mapValues { (_, list) -> list.sortedBy { it.startEpochSeconds } }
+    }
+
+    // "20260918235900 +0200" -> epoch seconds. A time with no offset is UTC
+    // per the XMLTV spec.
+    private fun parseXmltvTime(value: String?, format: SimpleDateFormat): Long? {
+        if (value.isNullOrBlank()) return null
+        val withOffset = if (value.contains(' ')) value else "$value +0000"
         return try {
-            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return null
-            if (listings.length() == 0) return null
-            val entry = listings.getJSONObject(0)
-            val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return null
-            NowPlayingInfo(
-                title = title,
-                description = decodeIfBase64(entry.optString("description")),
-                startEpochSeconds = entry.optString("start_timestamp").toLongOrNull(),
-                stopEpochSeconds = entry.optString("stop_timestamp").toLongOrNull()
-            )
-        } catch (e: Exception) {
+            format.parse(withOffset)?.time?.div(1000)
+        } catch (e: ParseException) {
             null
         }
     }
-
-    // get_short_epg's contract ("never returns anything already finished")
-    // turned out to not hold on this app's own provider: for some channels
-    // it returns nothing until well over an hour in the future, with no
-    // entry at all covering the real current time - confirmed by directly
-    // comparing its response against wall-clock time. get_simple_data_table
-    // (docs/xtream-api.md's documented "fallback EPG") returns the same
-    // per-channel data but as a much longer window (~180 entries/~1 week,
-    // ignores any limit param - confirmed by testing), which does contain
-    // the real currently-airing program. This is now the ONLY EPG-window
-    // fetch in the app (get_short_epg's getEpgWindow was removed
-    // 2026-09-17) - both the guide grid and the player read from the cache
-    // this populates instead of each having their own endpoint/cache.
-    // Entries missing a title or either timestamp are dropped: a program
-    // that can't be timed can't be placed on the grid.
-    suspend fun fetchEpgWindow(streamId: Int): List<EpgProgram> {
-        val body = getJson(playerApiUrl("get_simple_data_table", "&stream_id=$streamId"))
-        return try {
-            val listings = JSONObject(body).optJSONArray("epg_listings") ?: return emptyList()
-            (0 until listings.length()).mapNotNull { i ->
-                val entry = listings.getJSONObject(i)
-                val start = entry.optString("start_timestamp").toLongOrNull() ?: return@mapNotNull null
-                val stop = entry.optString("stop_timestamp").toLongOrNull() ?: return@mapNotNull null
-                val title = decodeIfBase64(entry.optString("title")).takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                EpgProgram(
-                    title = title,
-                    description = decodeIfBase64(entry.optString("description")),
-                    startEpochSeconds = start,
-                    stopEpochSeconds = stop
-                )
-            }.sortedBy { it.startEpochSeconds }
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    // Pure scan, no network - runs equally well against a fresh
-    // fetchEpgWindow() result or a cached list read back from
-    // channel_epg_window, so the player can derive current/next from
-    // whatever the guide already cached without a second network call.
-    suspend fun getCurrentAndNextProgram(streamId: Int): Pair<EpgProgram?, EpgProgram?> =
-        currentAndNextFrom(fetchEpgWindow(streamId))
 
     companion object {
         fun currentAndNextFrom(
@@ -504,15 +565,6 @@ class XtreamApi(private val credentials: ProviderCredentials) {
             val isCurrentlyAiring = nowEpochSeconds >= current.startEpochSeconds
             val next = programs.getOrNull(currentIndex + 1)
             return if (isCurrentlyAiring) current to next else null to current
-        }
-    }
-
-    private fun decodeIfBase64(value: String): String {
-        return try {
-            val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
-            if (decoded.isNotBlank() && decoded.none { it.code < 32 && it != '\n' }) decoded else value
-        } catch (e: Exception) {
-            value
         }
     }
 

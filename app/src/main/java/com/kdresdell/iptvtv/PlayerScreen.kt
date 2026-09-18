@@ -76,6 +76,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -98,8 +99,11 @@ fun PlayerScreen(
     streamUrl: String,
     contentId: Int,
     isLive: Boolean,
-    api: XtreamApi,
     channelDb: LiveChannelDatabase,
+    // Live-only: asks the background guide sync to cover this channel if it
+    // doesn't yet; true when it refreshed the cache. Never blocks the
+    // overlay - what's already cached shows first.
+    ensureEpg: suspend () -> Boolean = { false },
     subtitle: String? = null,
     loadDetails: suspend () -> ContentDetails = { ContentDetails() },
     onSelectRail: (RailItem) -> Unit,
@@ -425,41 +429,31 @@ fun PlayerScreen(
         showInfo = false
     }
 
-    // Live channels show the EPG "now playing" + "next up". Reads from the
-    // same channel_epg_window cache the My TV guide populates instead of
-    // always making its own network call - confirmed on real hardware
-    // (2026-09-17) that tuning a favorited channel right after the guide
-    // loaded it now shows now/next instantly with zero network wait. Only
-    // falls back to a fresh fetchEpgWindow (get_simple_data_table, not
-    // get_short_epg - that endpoint can return nothing covering the real
-    // current time for some channels) when the cache is missing or stale,
-    // e.g. a channel opened from Channels/category browse that was never a
-    // favorite. VOD movies and series episodes show their own synopsis via
-    // loadDescription instead (there's no EPG for on-demand content).
+    // Live channels show the EPG "now playing" + "next up", read straight
+    // from the guide cache (channel_epg_window, filled from xmltv.php by
+    // EpgSync) - instant, no network wait here. If the channel's category
+    // wasn't synced yet, ensureEpg() fetches it in the background and the
+    // overlay updates when it lands. VOD movies and series episodes show
+    // their own synopsis via loadDescription instead (there's no EPG for
+    // on-demand content).
     LaunchedEffect(contentId, isLive) {
         if (isLive) {
-            val (current, next) = try {
-                val (cachedPrograms, stale) = withContext(Dispatchers.IO) {
-                    channelDb.getCachedEpgWindow(contentId) to
-                        channelDb.isEpgWindowStale(contentId, 24 * 60 * 60 * 1000L)
-                }
-                val programs = if (cachedPrograms.isNotEmpty() && !stale) {
-                    cachedPrograms
-                } else {
-                    val fetched = api.fetchEpgWindow(contentId)
-                    if (fetched.isNotEmpty()) {
-                        withContext(Dispatchers.IO) { channelDb.setEpgWindow(contentId, fetched) }
-                    }
-                    fetched.ifEmpty { cachedPrograms }
-                }
-                XtreamApi.currentAndNextFrom(programs)
-            } catch (e: Exception) {
-                null to null
+            suspend fun showCached() {
+                val programs = withContext(Dispatchers.IO) { channelDb.getCachedEpgWindow(contentId) }
+                val (current, next) = XtreamApi.currentAndNextFrom(programs)
+                nowProgram = current
+                nextProgram = next
+                displayTitle = current?.title ?: title
+                description = current?.description
             }
-            nowProgram = current
-            nextProgram = next
-            displayTitle = current?.title ?: title
-            description = current?.description
+            showCached()
+            try {
+                if (ensureEpg()) showCached()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.log("Guide refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
         } else {
             displayTitle = title
             val details = loadDetails()
