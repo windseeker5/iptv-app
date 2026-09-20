@@ -107,6 +107,7 @@ fun PlayerScreen(
     subtitle: String? = null,
     loadDetails: suspend () -> ContentDetails = { ContentDetails() },
     onSelectRail: (RailItem) -> Unit,
+    hasSettingsAlert: Boolean = false,
     onChannelChange: (direction: Int) -> Unit = {},
     // Non-null only for live playback - the single ExoPlayer instance shared
     // with the reduced/embedded guide view (FavoritesScreen's
@@ -837,7 +838,8 @@ fun PlayerScreen(
                     menuOpen = false
                     onSelectRail(item)
                 },
-                requestInitialFocus = true
+                requestInitialFocus = true,
+                hasSettingsAlert = hasSettingsAlert
             )
         }
     }

@@ -592,6 +592,7 @@ class MainActivity : ComponentActivity() {
                         subtitle = params.subtitle,
                         loadDetails = params.loadDetails,
                         onSelectRail = onSelectRail,
+                        hasSettingsAlert = availableUpdate != null,
                         onChannelChange = { direction ->
                             if (params.isLive && favorites.isNotEmpty() && favoriteIndex >= 0) {
                                 val nextIndex = (favoriteIndex + direction + favorites.size) % favorites.size

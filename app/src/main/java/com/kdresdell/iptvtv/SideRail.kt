@@ -220,11 +220,18 @@ private fun RailRow(
             if (showAlert) {
                 Spacer(modifier = Modifier.weight(1f))
                 Box(
+                    contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(10.dp)
+                        .size(18.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.error)
-                )
+                ) {
+                    Text(
+                        text = "!",
+                        color = MaterialTheme.colorScheme.onError,
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
             }
         }
     }
