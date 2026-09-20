@@ -141,8 +141,10 @@ fun PlayerScreen(
     // left the toggle stale at "on", which still let the record hint and
     // duration menu show here even though nothing would actually record.
     // Re-checking the drive too, once per screen instance, closes that gap.
-    val recordingEnabled = remember {
-        RecordingPrefs.isEnabled(context) && RecordingStorage.isDriveAvailable(context)
+    // The doorbell is RTSP - LiveRecorder only copies HTTP streams.
+    val recordingEnabled = remember(contentId) {
+        !DoorbellChannel.isDoorbell(contentId) &&
+            RecordingPrefs.isEnabled(context) && RecordingStorage.isDriveAvailable(context)
     }
     // Surfaced on screen below (see playbackError) instead of failing
     // silently - a real gap this fixed: on a stream error the video area
@@ -547,7 +549,7 @@ fun PlayerScreen(
         menuOpen = true
     }
 
-    // Back opens/closes the in-player rail for VOD/episode (replacing
+    // Back opens the in-player rail for VOD/episode (replacing
     // DirectionLeft's old role - Left/Right are freed up for VOD seek, see
     // the onKeyEvent block below); for live it instead reduces to the
     // embedded guide (onReduceToGuide) - see that param's doc above. Handled
@@ -559,9 +561,10 @@ fun PlayerScreen(
     // falls through to leave the player on its own - an earlier version
     // tried a timing window to let a quick second Back "really" leave, but
     // that made Back unpredictably dump straight out to the (slow-loading)
-    // guide during ordinary open/close fumbling. Leaving the player there
-    // only happens by picking a destination from the opened rail
-    // (onSelectRail below) - deterministic, no accidental exits.
+    // guide during ordinary open/close fumbling. So: Back opens the rail,
+    // and Back again while it is open exits the app (same as everywhere
+    // else); Right closes it; picking a destination (onSelectRail below)
+    // leaves the player - deterministic, no accidental exits.
 
     // 0 = full-screen, 1 = shrunk into the guide's slot. Only read inside
     // layout/draw blocks below, so animating it re-lays-out and redraws
@@ -613,21 +616,25 @@ fun PlayerScreen(
                 false
             }
             .onKeyEvent { event ->
-                // Back closes the rail same as it opened it; Right is kept
-                // as a quick alternate "return to the stream" gesture
+                // Back while the rail is open exits the app (below); Right
+                // closes it - a quick "return to the stream" gesture
                 // (matches the old Left-opens/Right-closes muscle memory) -
                 // everything else here is left alone so the rail's own
                 // Cards get default TV focus/click handling (Up/Down move
                 // focus, Center/Enter selects).
                 if (menuOpen) {
                     if (event.type == KeyEventType.KeyDown) {
-                        if (event.key == Key.Back && isLive) {
-                            // Live: Back while the menu is open exits the
-                            // app (the nav spec's final step).
+                        if (event.key == Key.Back) {
+                            // Back while the menu is open exits the app (the
+                            // nav spec's final step) - live AND VOD/episode.
+                            // VOD used to just close the menu again here,
+                            // so Back toggled it forever and there was no
+                            // way out except picking a menu item first
+                            // (reported 2026-09-20 on a series episode).
                             onExitApp()
                             return@onKeyEvent true
                         }
-                        if (event.key == Key.DirectionRight || event.key == Key.Back) {
+                        if (event.key == Key.DirectionRight) {
                             menuOpen = false
                             if (reduced) coroutineScope.launch { guideFocusRequester.requestFocus() }
                             return@onKeyEvent true
@@ -807,7 +814,11 @@ fun PlayerScreen(
 
             if (playbackError != null && !reduced) {
                 Text(
-                    text = "Could not play this title: $playbackError",
+                    text = if (DoorbellChannel.isDoorbell(contentId)) {
+                        "Doorbell not reachable - are you on the home network?"
+                    } else {
+                        "Could not play this title: $playbackError"
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.align(Alignment.Center).padding(horizontal = 48.dp)
@@ -978,11 +989,25 @@ private fun PlayerInfoOverlay(
                 .padding(horizontal = 48.dp, vertical = 24.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = channelName,
-                color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.titleLarge.copy(shadow = textShadow)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isLive && iconUrl.isNotBlank()) {
+                    // Small channel logo, about the height of the name text.
+                    AsyncImage(
+                        model = iconUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+                Text(
+                    text = channelName,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleLarge.copy(shadow = textShadow)
+                )
+            }
             Text(
                 text = formatNowDateTime(nowEpochSeconds),
                 color = MaterialTheme.colorScheme.onSurface,
@@ -1064,21 +1089,7 @@ private fun PlayerInfoOverlay(
                 .padding(top = 64.dp, bottom = 24.dp)
         ) {
             Row(verticalAlignment = Alignment.Top) {
-                if (iconUrl.isNotBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .size(88.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(appColors.surfaceContainerHigh)
-                    ) {
-                        AsyncImage(
-                            model = iconUrl,
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
-                Column(modifier = Modifier.padding(start = 20.dp)) {
+                Column {
                     Text(
                         text = programTitle,
                         color = MaterialTheme.colorScheme.onSurface,

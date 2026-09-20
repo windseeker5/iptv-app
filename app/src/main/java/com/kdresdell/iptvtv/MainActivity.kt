@@ -34,6 +34,7 @@ private sealed class Screen {
     data object Help : Screen()
     data object Favorites : Screen()
     data object MyVod : Screen()
+    data object WhatsNew : Screen()
     data object Categories : Screen()
     data object Search : Screen()
     data class Channels(val category: LiveCategory) : Screen()
@@ -53,6 +54,7 @@ private fun Screen.toRailItem(): RailItem? = when (this) {
     is Screen.Search -> RailItem.Search
     is Screen.Favorites -> RailItem.MyChannel
     is Screen.MyVod -> RailItem.MyVod
+    is Screen.WhatsNew -> RailItem.WhatsNew
     is Screen.Categories, is Screen.Channels -> RailItem.Categories
     is Screen.Settings -> RailItem.Settings
     is Screen.Help -> RailItem.Help
@@ -63,6 +65,7 @@ private fun RailItem.toScreen(): Screen = when (this) {
     RailItem.Search -> Screen.Search
     RailItem.MyChannel -> Screen.Favorites
     RailItem.MyVod -> Screen.MyVod
+    RailItem.WhatsNew -> Screen.WhatsNew
     RailItem.Categories -> Screen.Categories
     RailItem.Settings -> Screen.Settings
     RailItem.Help -> Screen.Help
@@ -86,11 +89,11 @@ private data class PlayerParams(
     val loadDetails: suspend () -> ContentDetails
 )
 
-private fun PlayableItem.toPlayerParams(api: XtreamApi, channelDb: LiveChannelDatabase): PlayerParams = when (this) {
+private fun PlayableItem.toPlayerParams(api: XtreamApi, channelDb: LiveChannelDatabase, camera: CameraConfig): PlayerParams = when (this) {
     is PlayableItem.Live -> PlayerParams(
         title = channel.name,
         iconUrl = channel.streamIcon,
-        streamUrl = api.liveStreamUrl(channel.streamId),
+        streamUrl = if (DoorbellChannel.isDoorbell(channel.streamId)) DoorbellChannel.rtspUrl(camera) else api.liveStreamUrl(channel.streamId),
         contentId = channel.streamId,
         isLive = true,
         subtitle = null,
@@ -171,7 +174,10 @@ class MainActivity : ComponentActivity() {
             val searchHistoryStore = remember { SearchHistoryStore(context) }
             val vodFavoritesStore = remember { VodFavoritesStore(context) }
             var credentials by remember { mutableStateOf(prefs.load()) }
-            var favorites by remember { mutableStateOf(favoritesStore.load()) }
+            val cameraPrefs = remember { CameraPrefs(context) }
+            var camera by remember { mutableStateOf(cameraPrefs.load()) }
+            // The doorbell is injected here, never persisted (see DoorbellChannel).
+            var favorites by remember { mutableStateOf(DoorbellChannel.withDoorbell(favoritesStore.load(), camera)) }
             var defaultStreamId by remember { mutableStateOf(defaultChannelStore.getDefaultStreamId()) }
             var searchHistory by remember { mutableStateOf(searchHistoryStore.load()) }
             var savedMovies by remember { mutableStateOf(vodFavoritesStore.loadMovies()) }
@@ -223,14 +229,21 @@ class MainActivity : ComponentActivity() {
             }
 
             val isFavorite: (Int) -> Boolean = { id -> favorites.any { it.streamId == id } }
-            val toggleFavorite: (LiveChannel) -> Unit = { channel ->
-                favorites = favoritesStore.toggle(channel, favorites)
+            val toggleFavorite: (LiveChannel) -> Unit = toggle@{ channel ->
+                // The doorbell comes and goes with its Settings entry, not the star.
+                if (DoorbellChannel.isDoorbell(channel.streamId)) return@toggle
+                favorites = DoorbellChannel.withDoorbell(favoritesStore.toggle(channel, favorites), camera)
                 // A channel that is no longer a favorite can't stay the
                 // default (it would still auto-launch at app start).
                 if (defaultStreamId == channel.streamId && favorites.none { it.streamId == channel.streamId }) {
                     defaultStreamId = null
                     defaultChannelStore.setDefault(null)
                 }
+            }
+            val onSaveCamera: (CameraConfig) -> Unit = { saved ->
+                cameraPrefs.save(saved)
+                camera = saved
+                favorites = DoorbellChannel.withDoorbell(favorites, saved)
             }
             val guideRecording = remember { GuideRecordingBridge() }
             val onSetDefault: (LiveChannel) -> Unit = { channel ->
@@ -287,6 +300,28 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // What's New's daily background refresh (provider lists + IMDb
+            // scores, see CatalogRefresher). Same idea as the guide refresh
+            // above: wait for the first screen to settle, then check hourly
+            // whether anything is older than a day. The screen itself only
+            // reads what this has already stored.
+            var whatsNewVersion by remember { mutableStateOf(0) }
+            val catalogRefresher = remember(credentials) { CatalogRefresher(XtreamApi(credentials), channelDb) }
+            LaunchedEffect(catalogRefresher) {
+                if (!credentials.isComplete) return@LaunchedEffect
+                delay(60_000L)
+                while (true) {
+                    try {
+                        if (catalogRefresher.refreshIfStale()) whatsNewVersion++
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        AppLog.log("Daily refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                    delay(60L * 60 * 1000)
+                }
+            }
+
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -300,7 +335,9 @@ class MainActivity : ComponentActivity() {
                                 screen = Screen.Favorites
                             },
                             availableUpdate = availableUpdate,
-                            onUpdateClick = onUpdateClick
+                            onUpdateClick = onUpdateClick,
+                            cameraInitial = camera,
+                            onSaveCamera = onSaveCamera
                         )
                     } else {
                         WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
@@ -312,7 +349,9 @@ class MainActivity : ComponentActivity() {
                                     screen = Screen.Favorites
                                 },
                                 availableUpdate = availableUpdate,
-                                onUpdateClick = onUpdateClick
+                                onUpdateClick = onUpdateClick,
+                                cameraInitial = camera,
+                                onSaveCamera = onSaveCamera
                             )
                         }
                     }
@@ -330,7 +369,7 @@ class MainActivity : ComponentActivity() {
                             favorites = favorites,
                             epgWindows = epgWindows,
                             defaultStreamId = defaultStreamId,
-                            streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
+                            streamUrlFor = { id -> if (DoorbellChannel.isDoorbell(id)) DoorbellChannel.rtspUrl(camera) else epgApi.liveStreamUrl(id) },
                             onPlay = { channel ->
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = Screen.Favorites)
                             },
@@ -519,6 +558,35 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                is Screen.WhatsNew -> {
+                    var whatsNewState by remember { mutableStateOf<LoadState<WhatsNewContent>>(LoadState.Loading) }
+                    // Reads the local database only (a couple of quick
+                    // queries); reloads after each background refresh.
+                    LaunchedEffect(whatsNewVersion) {
+                        whatsNewState = try {
+                            LoadState.Success(withContext(Dispatchers.IO) { WhatsNewContent.load(channelDb) })
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLog.log("What's New failed: ${e.javaClass.simpleName}: ${e.message}")
+                            LoadState.Error(e.message ?: "Unknown error")
+                        }
+                    }
+                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
+                        WhatsNewScreen(
+                            state = whatsNewState,
+                            isMovieSaved = isMovieSaved,
+                            isSeriesSaved = isSeriesSaved,
+                            onPlayMovie = { movie ->
+                                screen = Screen.NowPlaying(PlayableItem.Vod(movie), returnTo = Screen.WhatsNew)
+                            },
+                            onOpenEpisodes = { series -> screen = Screen.SeriesEpisodes(series, returnTo = Screen.WhatsNew) },
+                            onToggleMovieSaved = toggleMovieSaved,
+                            onToggleSeriesSaved = toggleSeriesSaved
+                        )
+                    }
+                }
+
                 is Screen.SeriesEpisodes -> {
                     val api = remember(credentials) { XtreamApi(credentials) }
                     var episodesState by remember(currentScreen.series) {
@@ -572,7 +640,7 @@ class MainActivity : ComponentActivity() {
                     // rely on it (same reason WithRail's Back handling in
                     // SideRail.kt uses raw onKeyEvent too).
                     val item = currentScreen.item
-                    val params = remember(item) { item.toPlayerParams(api, channelDb) }
+                    val params = remember(item) { item.toPlayerParams(api, channelDb, camera) }
                     // Up/down channel-cycling always cycles through favorites
                     // specifically (not whatever list you arrived from), per
                     // the user's request - a no-op if the current channel
@@ -630,7 +698,7 @@ class MainActivity : ComponentActivity() {
                                     favorites = favorites,
                                     epgWindows = epgWindows,
                                     defaultStreamId = defaultStreamId,
-                                    streamUrlFor = { id -> epgApi.liveStreamUrl(id) },
+                                    streamUrlFor = { id -> if (DoorbellChannel.isDoorbell(id)) DoorbellChannel.rtspUrl(camera) else epgApi.liveStreamUrl(id) },
                                     onPlay = { },
                                     onRemove = toggleFavorite,
                                     onSetDefault = onSetDefault,

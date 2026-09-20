@@ -61,6 +61,7 @@ enum class RailItem(val icon: ImageVector, val label: String) {
     Search(RailIcons.Search, "Search"),
     MyChannel(RailIcons.MyTv, "My TV"),
     MyVod(RailIcons.MyLibrairie, "My Librairie"),
+    WhatsNew(RailIcons.WhatsNew, "What's New"),
     Categories(RailIcons.All, "All"),
     Settings(RailIcons.Settings, "Settings"),
     Help(RailIcons.Help, "Help")
@@ -134,7 +135,7 @@ fun SideRail(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                listOf(RailItem.Search, RailItem.MyChannel, RailItem.MyVod, RailItem.Categories).forEachIndexed { index, item ->
+                listOf(RailItem.Search, RailItem.MyChannel, RailItem.MyVod, RailItem.WhatsNew, RailItem.Categories).forEachIndexed { index, item ->
                     RailRow(
                         item = item,
                         selected = selected,

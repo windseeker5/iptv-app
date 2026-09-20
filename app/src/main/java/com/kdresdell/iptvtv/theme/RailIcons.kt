@@ -137,6 +137,23 @@ object RailIcons {
         }
     }
 
+    // What's New - compass ("discover").
+    // <circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
+    val WhatsNew: ImageVector = strokeIcon("RailWhatsNew") {
+        strokePath {
+            moveTo(22f, 12f)
+            arcToRelative(10f, 10f, 0f, true, true, -20f, 0f)
+            arcToRelative(10f, 10f, 0f, true, true, 20f, 0f)
+        }
+        strokePath {
+            moveTo(16.24f, 7.76f)
+            lineTo(14.12f, 14.12f)
+            lineTo(7.76f, 16.24f)
+            lineTo(9.88f, 9.88f)
+            close()
+        }
+    }
+
     // §6.4 search history "clear" icon.
     // <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
     // <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>

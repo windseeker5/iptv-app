@@ -35,7 +35,15 @@ data class VodStream(
     val name: String,
     val categoryId: String,
     val streamIcon: String = "",
-    val containerExtension: String = "mp4"
+    val containerExtension: String = "mp4",
+    // What's New only. releaseYear is parsed from the "(2026)" the provider
+    // puts in the name (0 = none); tmdb is the provider's TMDB id, the key
+    // for the IMDb scores (see LiveChannelDatabase.imdb_ratings); imdbRating
+    // is only filled by the What's New queries (0 = unknown). The provider's
+    // own rating is deliberately not used.
+    val releaseYear: Int = 0,
+    val tmdb: Int = 0,
+    val imdbRating: Double = 0.0
 )
 
 // Xtream treats series (TV shows) as a third content type, separate from
@@ -45,8 +53,18 @@ data class SeriesShow(
     val seriesId: Int,
     val name: String,
     val categoryId: String,
-    val cover: String = ""
+    val cover: String = "",
+    // See VodStream.
+    val releaseYear: Int = 0,
+    val tmdb: Int = 0,
+    val imdbRating: Double = 0.0
 )
+
+private val YEAR_IN_NAME = Regex("\\((?:19|20)\\d\\d\\)")
+
+// The provider puts the release year in the title, "EN - Moana (2026)".
+internal fun releaseYearFromName(name: String): Int =
+    YEAR_IN_NAME.find(name)?.value?.substring(1, 5)?.toIntOrNull() ?: 0
 
 data class SeriesEpisode(
     val episodeId: Int,
@@ -283,6 +301,7 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                 var categoryId = ""
                                 var streamIcon = ""
                                 var containerExtension = "mp4"
+                                var tmdb = 0
                                 json.beginObject()
                                 while (json.hasNext()) {
                                     val fieldName = json.nextName()
@@ -296,11 +315,12 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                         "category_id" -> categoryId = json.nextString()
                                         "stream_icon" -> streamIcon = json.nextString()
                                         "container_extension" -> containerExtension = json.nextString()
+                                        "tmdb" -> tmdb = json.nextString().toIntOrNull() ?: 0
                                         else -> json.skipValue()
                                     }
                                 }
                                 json.endObject()
-                                yield(VodStream(streamId, name, categoryId, streamIcon, containerExtension))
+                                yield(VodStream(streamId, name, categoryId, streamIcon, containerExtension, releaseYearFromName(name), tmdb))
                             }
                             json.endArray()
                         }
@@ -338,6 +358,7 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                 var name = ""
                                 var categoryId = ""
                                 var cover = ""
+                                var tmdb = 0
                                 json.beginObject()
                                 while (json.hasNext()) {
                                     val fieldName = json.nextName()
@@ -350,11 +371,12 @@ class XtreamApi(private val credentials: ProviderCredentials) {
                                         "name" -> name = json.nextString()
                                         "category_id" -> categoryId = json.nextString()
                                         "cover" -> cover = json.nextString()
+                                        "tmdb" -> tmdb = json.nextString().toIntOrNull() ?: 0
                                         else -> json.skipValue()
                                     }
                                 }
                                 json.endObject()
-                                yield(SeriesShow(seriesId, name, categoryId, cover))
+                                yield(SeriesShow(seriesId, name, categoryId, cover, releaseYearFromName(name), tmdb))
                             }
                             json.endArray()
                         }

@@ -53,7 +53,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Border
@@ -493,7 +492,7 @@ private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val exoPlayer = remember(streamUrl) {
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(streamUrl))
+            setLiveStream(streamUrl)
             prepare()
             playWhenReady = true
         }

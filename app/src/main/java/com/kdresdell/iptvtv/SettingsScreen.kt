@@ -324,8 +324,16 @@ fun SettingsScreen(
     onSave: (ProviderCredentials) -> Unit,
     currentVersionName: String = BuildConfig.VERSION_NAME,
     availableUpdate: UpdateInfo? = null,
-    onUpdateClick: () -> Unit = {}
+    onUpdateClick: () -> Unit = {},
+    cameraInitial: CameraConfig = CameraConfig(),
+    onSaveCamera: (CameraConfig) -> Unit = {}
 ) {
+    var camEnabled by remember { mutableStateOf(cameraInitial.enabled) }
+    var camHost by remember { mutableStateOf(cameraInitial.host) }
+    var camUser by remember { mutableStateOf(cameraInitial.username) }
+    var camPass by remember { mutableStateOf(cameraInitial.password) }
+    var camHd by remember { mutableStateOf(cameraInitial.useHd) }
+    var camSaved by remember { mutableStateOf(false) }
     var serverUrl by remember { mutableStateOf(initial.serverUrl) }
     var username by remember { mutableStateOf(initial.username) }
     var password by remember { mutableStateOf(initial.password) }
@@ -355,6 +363,12 @@ fun SettingsScreen(
     val passwordFocus = remember { FocusRequester() }
     val saveFocus = remember { FocusRequester() }
     val recordingToggleFocus = remember { FocusRequester() }
+    val camToggleFocus = remember { FocusRequester() }
+    val camHostFocus = remember { FocusRequester() }
+    val camUserFocus = remember { FocusRequester() }
+    val camPassFocus = remember { FocusRequester() }
+    val camHdFocus = remember { FocusRequester() }
+    val camSaveFocus = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -480,7 +494,11 @@ fun SettingsScreen(
                         driveCheckMessage = "No writable USB drive found - see the setup steps below, then try again."
                     }
                 },
-                modifier = Modifier.focusRequester(recordingToggleFocus)
+                modifier = Modifier.focusRequester(recordingToggleFocus),
+                onDirectionDown = {
+                    camToggleFocus.requestFocus()
+                    true
+                }
             )
         }
         if (driveCheckMessage != null) {
@@ -521,7 +539,117 @@ fun SettingsScreen(
             }
         }
 
-        // 3. App Update - moved below Provider Setup (was above it) and,
+        // 3. Doorbell camera - optional and private to this device. Left
+        // blank, nothing appears anywhere; filled in, a "Doorbell" channel
+        // is added at the end of Favorites (see DoorbellChannel). Stored
+        // only in this TV's preferences, never in the app itself. Off by
+        // default; the switch reveals the fields below it (accordion). Sits after Recording, per request.
+        item { SectionDivider() }
+        item {
+            Text(text = "Doorbell camera", style = sectionHeaderStyle(), color = MaterialTheme.colorScheme.onSurface)
+        }
+        item {
+            ToggleRow(
+                label = "Enable doorbell camera",
+                checked = camEnabled,
+                onToggle = {
+                    camEnabled = !camEnabled
+                    camSaved = false
+                    // Switching off takes effect at once - the channel
+                    // leaves Favorites without needing a Save.
+                    if (!camEnabled) {
+                        onSaveCamera(CameraConfig(false, camHost.trim(), camUser.trim(), camPass, camHd))
+                    }
+                },
+                modifier = Modifier.focusRequester(camToggleFocus),
+                onDirectionDown = {
+                    if (camEnabled) { camHostFocus.requestFocus(); true } else { if (availableUpdate != null) { updateFocus.requestFocus(); true } else false }
+                }
+            )
+        }
+        if (camEnabled) {
+            item {
+                SettingsField(
+                    label = "Camera address (e.g. 192.168.1.174)",
+                    value = camHost,
+                    onValueChange = { camHost = it; camSaved = false },
+                    focusRequester = camHostFocus,
+                    imeAction = ImeAction.Next,
+                    onImeAction = { camUserFocus.requestFocus() },
+                    onDirectionDown = {
+                        camUserFocus.requestFocus()
+                        coroutineScope.hideKeyboardAfterNav(keyboardController)
+                        true
+                    }
+                )
+            }
+            item {
+                SettingsField(
+                    label = "Camera username",
+                    value = camUser,
+                    onValueChange = { camUser = it; camSaved = false },
+                    focusRequester = camUserFocus,
+                    imeAction = ImeAction.Next,
+                    onImeAction = { camPassFocus.requestFocus() },
+                    onDirectionDown = {
+                        camPassFocus.requestFocus()
+                        coroutineScope.hideKeyboardAfterNav(keyboardController)
+                        true
+                    }
+                )
+            }
+            item {
+                SettingsField(
+                    label = "Camera password",
+                    value = camPass,
+                    onValueChange = { camPass = it; camSaved = false },
+                    focusRequester = camPassFocus,
+                    imeAction = ImeAction.Done,
+                    onImeAction = {
+                        keyboardController?.hide()
+                        camHdFocus.requestFocus()
+                    },
+                    onDirectionDown = {
+                        camHdFocus.requestFocus()
+                        coroutineScope.hideKeyboardAfterNav(keyboardController)
+                        true
+                    },
+                    isPassword = true
+                )
+            }
+            item {
+                ToggleRow(
+                    label = "HD stream (sharper, needs a stronger connection)",
+                    checked = camHd,
+                    onToggle = { camHd = !camHd; camSaved = false },
+                    modifier = Modifier.focusRequester(camHdFocus)
+                )
+            }
+            item {
+                PrimaryActionButton(
+                    text = "Save doorbell",
+                    onClick = {
+                        onSaveCamera(CameraConfig(true, camHost.trim(), camUser.trim(), camPass, camHd))
+                        camSaved = true
+                    },
+                    modifier = Modifier.focusRequester(camSaveFocus),
+                    onDirectionDown = {
+                        if (availableUpdate != null) { updateFocus.requestFocus(); true } else false
+                    }
+                )
+            }
+        }
+        if (camSaved && camEnabled) {
+            item {
+                Text(
+                    text = "Saved - the Doorbell channel is now last in your Favorites.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // 4. App Update - moved below Provider Setup (was above it) and,
         // like the error log below, only rendered at all when there's
         // something to act on: no more permanent "Up to date" status line
         // cluttering the screen when there's nothing to do. Reachable the
@@ -568,7 +696,7 @@ fun SettingsScreen(
             }
         }
 
-        // 4. Error log (prototype-stage debugging - no adb/logcat access for
+        // 5. Error log (prototype-stage debugging - no adb/logcat access for
         // the people actually testing this on real TVs). Section - divider,
         // header, and all - only exists when there's actually something to
         // show: an empty "Error Log / No errors logged" state had nothing
