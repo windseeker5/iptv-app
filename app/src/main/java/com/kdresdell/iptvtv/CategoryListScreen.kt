@@ -42,6 +42,8 @@ fun CategoryListScreen(
     onSelectCategory: (LiveCategory) -> Unit
 ) {
     val firstItemFocus = remember { FocusRequester() }
+    // Item 0 of the LazyColumn is the title, so the rows start at lazy index 1.
+    val wrap = rememberListWrap(count = (state as? LoadState.Success)?.data?.size ?: 0, headerCount = 1)
 
     // Without this, D-pad focus lands nowhere when this screen opens - the
     // first press anywhere jumps to the side rail's Search item instead of
@@ -84,8 +86,9 @@ fun CategoryListScreen(
                     }
                 } else {
                     LazyColumn(
+                        state = wrap.listState,
                         verticalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.padding(horizontal = 48.dp, vertical = 24.dp)
+                        modifier = Modifier.padding(horizontal = 48.dp, vertical = 24.dp).then(wrap.keys)
                     ) {
                         item {
                             Text(
@@ -99,7 +102,8 @@ fun CategoryListScreen(
                             CategoryRow(
                                 category = category,
                                 onClick = { onSelectCategory(category) },
-                                modifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
+                                modifier = (if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                                    .then(wrap.itemModifier(index))
                             )
                         }
                     }

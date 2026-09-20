@@ -51,6 +51,8 @@ fun SeriesEpisodesScreen(
     val onBackground = MaterialTheme.colorScheme.onBackground
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
     val firstItemFocus = remember { FocusRequester() }
+    // "Season N" titles live inside their episode's item, so list index = lazy index.
+    val wrap = rememberListWrap(count = (state as? LoadState.Success)?.data?.episodes?.size ?: 0)
 
     // See CategoryListScreen for why this is needed - without it, D-pad
     // focus lands nowhere when this screen opens.
@@ -103,8 +105,9 @@ fun SeriesEpisodesScreen(
                         Text(text = "No episodes found", color = onSurfaceVariant, modifier = Modifier.align(Alignment.Center))
                     } else {
                         LazyColumn(
+                            state = wrap.listState,
                             verticalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize().then(wrap.keys)
                         ) {
                             itemsIndexed(rows) { index, (episode, isNewSeason) ->
                                 if (isNewSeason) {
@@ -118,7 +121,8 @@ fun SeriesEpisodesScreen(
                                 EpisodeRow(
                                     episode = episode,
                                     onSelect = { onSelectEpisode(episode) },
-                                    rowModifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
+                                    rowModifier = (if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                                        .then(wrap.itemModifier(index))
                                 )
                             }
                         }
