@@ -21,6 +21,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.kdresdell.iptvtv.theme.LocalAppColors
 import java.io.File
 
 // §6.6 My Librairie - saved movies and series, poster-grid browse screen
@@ -43,6 +44,7 @@ fun MyVodScreen(
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
+    val accent = LocalAppColors.current.vividAccent
     val isEmpty = savedMovies.isEmpty() && savedSeries.isEmpty() && recordings.isEmpty()
     val firstItemFocus = remember { FocusRequester() }
     val totalCount = savedMovies.size + savedSeries.size + recordings.size
@@ -77,7 +79,7 @@ fun MyVodScreen(
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(text = "My Librairie", style = libraryTitleStyle(), color = onBackground, modifier = Modifier.alignByBaseline())
-                    Text(text = "$totalCount titles", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
+                    Text(text = "$totalCount titles", style = MaterialTheme.typography.labelMedium, color = accent, modifier = Modifier.alignByBaseline())
                 }
             }
             if (savedMovies.isNotEmpty()) {
@@ -86,7 +88,7 @@ fun MyVodScreen(
                         title = "Movies",
                         count = savedMovies.size,
                         headingColor = onBackground,
-                        countColor = onSurfaceVariant
+                        countColor = accent
                     ) {
                         savedMovies.forEachIndexed { index, movie ->
                             PosterCard(
@@ -107,7 +109,7 @@ fun MyVodScreen(
                         title = "Series",
                         count = savedSeries.size,
                         headingColor = onBackground,
-                        countColor = onSurfaceVariant
+                        countColor = accent
                     ) {
                         savedSeries.forEachIndexed { index, series ->
                             PosterCard(
@@ -131,7 +133,7 @@ fun MyVodScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(text = "Recordings", style = librarySectionHeaderStyle(), color = onBackground, modifier = Modifier.alignByBaseline())
-                            Text(text = "${recordings.size}", style = MaterialTheme.typography.labelMedium, color = onSurfaceVariant, modifier = Modifier.alignByBaseline())
+                            Text(text = "${recordings.size}", style = MaterialTheme.typography.labelMedium, color = accent, modifier = Modifier.alignByBaseline())
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             recordings.forEachIndexed { index, file ->

@@ -225,7 +225,14 @@ class MainActivity : ComponentActivity() {
             val isFavorite: (Int) -> Boolean = { id -> favorites.any { it.streamId == id } }
             val toggleFavorite: (LiveChannel) -> Unit = { channel ->
                 favorites = favoritesStore.toggle(channel, favorites)
+                // A channel that is no longer a favorite can't stay the
+                // default (it would still auto-launch at app start).
+                if (defaultStreamId == channel.streamId && favorites.none { it.streamId == channel.streamId }) {
+                    defaultStreamId = null
+                    defaultChannelStore.setDefault(null)
+                }
             }
+            val guideRecording = remember { GuideRecordingBridge() }
             val onSetDefault: (LiveChannel) -> Unit = { channel ->
                 val newDefault = if (defaultStreamId == channel.streamId) null else channel.streamId
                 defaultStreamId = newDefault
@@ -328,7 +335,15 @@ class MainActivity : ComponentActivity() {
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = Screen.Favorites)
                             },
                             onRemove = toggleFavorite,
-                            onSetDefault = onSetDefault
+                            onSetDefault = onSetDefault,
+                            onRecordShow = { channel, minutes ->
+                                guideRecording.pendingMinutes = minutes
+                                screen = Screen.NowPlaying(
+                                    PlayableItem.Live(channel),
+                                    returnTo = Screen.Favorites,
+                                    viewMode = PlayerViewMode.ReducedWithGuide
+                                )
+                            }
                         )
                     }
                 }
@@ -607,6 +622,7 @@ class MainActivity : ComponentActivity() {
                             screen = Screen.NowPlaying(item, returnTo = currentScreen.returnTo, viewMode = PlayerViewMode.ReducedWithGuide)
                         },
                         reduced = reduced,
+                        guideRecording = if (params.isLive) guideRecording else null,
                         onExitApp = onExitApp,
                         guideContent = {
                             if (item is PlayableItem.Live) {
@@ -619,6 +635,15 @@ class MainActivity : ComponentActivity() {
                                     onRemove = toggleFavorite,
                                     onSetDefault = onSetDefault,
                                     mode = GuideMode.Embedded,
+                                    recording = guideRecording,
+                                    onRecordShow = { channel, minutes ->
+                                        guideRecording.pendingMinutes = minutes
+                                        screen = Screen.NowPlaying(
+                                            PlayableItem.Live(channel),
+                                            returnTo = currentScreen.returnTo,
+                                            viewMode = PlayerViewMode.ReducedWithGuide
+                                        )
+                                    },
                                     tunedChannel = item.channel,
                                     onChannelTuned = { channel ->
                                         screen = Screen.NowPlaying(

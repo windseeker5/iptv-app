@@ -2,7 +2,6 @@ package com.kdresdell.iptvtv
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -42,7 +41,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -101,10 +99,12 @@ private const val ScrollStepMinutes = 30f
 // BrowseOnly is today's "My TV" screen, reached from the rail, unchanged.
 // Embedded is the guide shown while watching live (Back from full-screen):
 // PlayerScreen draws its own live video on top of this guide's top-left
-// slot, so this composable draws no video itself in that mode. Up/Down
-// report the highlighted channel (onChannelTuned) so the player can switch to
-// it, Left/Right scroll the timeline both ways (no side menu - Back opens
-// that), and OK calls onExpand() to go back to full-screen.
+// slot, so this composable draws no video itself in that mode. In both modes
+// the arrows only move a browse cursor (info panel + green highlight follow
+// it, the preview does not change); the first OK on another channel tunes
+// the preview to it (onChannelTuned in Embedded), OK on the previewed channel
+// goes full screen (onExpand / onPlay). In Embedded, Left never opens the side
+// menu - Back does that.
 enum class GuideMode { BrowseOnly, Embedded }
 
 @Composable
@@ -117,6 +117,11 @@ fun FavoritesScreen(
     onRemove: (LiveChannel) -> Unit,
     onSetDefault: (LiveChannel) -> Unit,
     mode: GuideMode = GuideMode.BrowseOnly,
+    // Recording from the long-press menu: `recording` is the player's live
+    // state (see GuideRecordingBridge, null when no player is mounted);
+    // onRecordShow tunes the channel and records it for the given minutes.
+    recording: GuideRecordingBridge? = null,
+    onRecordShow: (LiveChannel, Int) -> Unit = { _, _ -> },
     // Embedded-only params (see GuideMode doc above) - null/no-op defaults
     // keep every existing BrowseOnly call site unchanged.
     tunedChannel: LiveChannel? = null,
@@ -141,16 +146,59 @@ fun FavoritesScreen(
         // and hear/see each channel's own live audio + description without
         // leaving this screen. Starts on the tuned channel since that's where
         // initial focus lands in the grid below.
+        // Moving around the guide no longer retunes anything: previewChannel
+        // only changes on OK (see onOk below).
         var previewChannel by remember { mutableStateOf(defaultTunedChannel) }
         val displayedChannel = if (mode == GuideMode.Embedded) tunedChannel else (previewChannel ?: defaultTunedChannel)
 
+        // The browse cursor: which channel row + which moment in time the
+        // D-pad is on. The info panel and the green highlight follow it; the
+        // preview (displayedChannel) does not.
+        val windowStartEpoch = windowStartFor(nowEpoch)
+        var cursorEpoch by remember { mutableStateOf(nowEpoch) }
+        var cursorStreamId by remember {
+            mutableStateOf(if (mode == GuideMode.Embedded) tunedChannel?.streamId else defaultTunedChannel?.streamId)
+        }
+        val effectiveCursorEpoch = max(cursorEpoch, windowStartEpoch)
+        val cursorChannel = favorites.find { it.streamId == cursorStreamId } ?: displayedChannel
+        val cursorPrograms = cursorChannel?.let { epgWindows[it.streamId].orEmpty() }.orEmpty()
+        val cursorProgram = programAt(cursorPrograms, effectiveCursorEpoch)
+        val cursorSpan = cursorChannel?.let { spanAtCursor(cursorPrograms, effectiveCursorEpoch, windowStartEpoch) }
+
+        // "Record this show" is offered for whichever program airing right now
+        // the cursor is on, on any channel: choosing it tunes that channel
+        // (onRecordShow) and the player starts recording until the program
+        // ends. Future shows are not scheduled yet. While a recording runs
+        // only "Stop recording" is offered - tuning elsewhere would end it.
+        val context = LocalContext.current
+        val recordingAllowed = remember {
+            RecordingPrefs.isEnabled(context) && RecordingStorage.isDriveAvailable(context)
+        }
+        val recordActionFor: (LiveChannel) -> MenuAction? = { channel ->
+            when {
+                !recordingAllowed -> null
+                recording?.isRecording == true ->
+                    if (channel.streamId == tunedChannel?.streamId) {
+                        MenuAction("Stop recording", { recording.stopRequested = true })
+                    } else {
+                        null
+                    }
+                channel.streamId == cursorChannel?.streamId &&
+                    cursorProgram != null &&
+                    cursorProgram.startEpochSeconds <= nowEpoch &&
+                    nowEpoch < cursorProgram.stopEpochSeconds -> {
+                    val minutes = ((cursorProgram.stopEpochSeconds - nowEpoch + 59) / 60).toInt().coerceAtLeast(1)
+                    MenuAction("Record this show", { onRecordShow(channel, minutes) })
+                }
+                else -> null
+            }
+        }
+
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 16.dp)) {
             TopPreviewBlock(
-                channel = displayedChannel,
-                program = displayedChannel?.let { channel ->
-                    epgWindows[channel.streamId].orEmpty()
-                        .firstOrNull { nowEpoch in it.startEpochSeconds until it.stopEpochSeconds }
-                },
+                previewChannel = displayedChannel,
+                cursorChannel = cursorChannel,
+                program = cursorProgram,
                 // Embedded never gets a live video surface here (see
                 // SharedLivePreview's removal note below) - falls to the
                 // channel-icon fallback branch, same as "no stream" does in
@@ -170,13 +218,24 @@ fun FavoritesScreen(
                 nowEpoch = nowEpoch,
                 initialFocusStreamId = if (mode == GuideMode.Embedded) tunedChannel?.streamId else defaultStreamId,
                 mode = mode,
-                onPlay = if (mode == GuideMode.Embedded) { _ -> onExpand() } else onPlay,
+                cursorStreamId = cursorChannel?.streamId,
+                cursorEpoch = effectiveCursorEpoch,
+                cursorSpan = cursorSpan,
+                onCursorEpochChange = { cursorEpoch = it },
+                // First OK on another channel tunes the preview to it; OK on
+                // the channel already in the preview goes full screen.
+                onOk = { channel ->
+                    if (channel.streamId == displayedChannel?.streamId) {
+                        if (mode == GuideMode.Embedded) onExpand() else onPlay(channel)
+                    } else {
+                        previewChannel = channel
+                        if (mode == GuideMode.Embedded) onChannelTuned(channel)
+                    }
+                },
                 onSetDefault = onSetDefault,
                 onRemove = onRemove,
-                onFocusedChannelChanged = { channel ->
-                    previewChannel = channel
-                    if (mode == GuideMode.Embedded) onChannelTuned(channel)
-                },
+                recordActionFor = recordActionFor,
+                onFocusedChannelChanged = { channel -> cursorStreamId = channel.streamId },
                 modifier = Modifier.weight(1f).fillMaxWidth()
             )
         }
@@ -195,18 +254,22 @@ private fun EpgTimelineGrid(
     nowEpoch: Long,
     initialFocusStreamId: Int?,
     mode: GuideMode,
-    onPlay: (LiveChannel) -> Unit,
+    cursorStreamId: Int?,
+    cursorEpoch: Long,
+    cursorSpan: Pair<Long, Long>?,
+    onCursorEpochChange: (Long) -> Unit,
+    onOk: (LiveChannel) -> Unit,
     onSetDefault: (LiveChannel) -> Unit,
     onRemove: (LiveChannel) -> Unit,
+    recordActionFor: (LiveChannel) -> MenuAction?,
     onFocusedChannelChanged: (LiveChannel) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val appColors = LocalAppColors.current
-    val windowStartEpoch = (nowEpoch / HalfHourSeconds) * HalfHourSeconds
+    val windowStartEpoch = windowStartFor(nowEpoch)
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-    val scrollStepPx = with(density) { (ScrollStepMinutes * PxPerMinute).dp.toPx() }
     val firstItemFocusRequester = remember { FocusRequester() }
     val initialFocusIndex = remember(favorites, initialFocusStreamId) {
         initialFocusStreamId?.let { id -> favorites.indexOfFirst { it.streamId == id } }
@@ -221,10 +284,31 @@ private fun EpgTimelineGrid(
 
     BoxWithConstraints(modifier = modifier) {
         val channelColumnWidth = maxWidth * ChannelColumnFraction
+        val viewportPx = with(density) { (maxWidth - channelColumnWidth).toPx() }
+
+        // Scroll the shared timeline just enough to bring a program (or the
+        // part of it that fits) into view.
+        val revealSpan: (Long, Long) -> Unit = { startEpoch, stopEpoch ->
+            val startPx = with(density) { ((startEpoch - windowStartEpoch) / 60f * PxPerMinute).dp.toPx() }
+            val endPx = with(density) { ((stopEpoch - windowStartEpoch) / 60f * PxPerMinute).dp.toPx() }
+            val current = scrollState.value
+            val target = when {
+                startPx < current -> startPx
+                endPx > current + viewportPx -> min(startPx, endPx - viewportPx)
+                else -> null
+            }
+            if (target != null) {
+                coroutineScope.launch { scrollState.animateScrollTo(target.roundToInt().coerceAtLeast(0)) }
+            }
+        }
+        val moveCursorTo: (EpgProgram) -> Unit = { program ->
+            onCursorEpochChange(max(program.startEpochSeconds, windowStartEpoch))
+            revealSpan(max(program.startEpochSeconds, windowStartEpoch), program.stopEpochSeconds)
+        }
 
         Box(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.fillMaxSize()) {
-                GuideHeader(windowStartEpoch, favorites, epgWindows, scrollState, channelColumnWidth)
+                GuideHeader(windowStartEpoch, favorites, epgWindows, scrollState, channelColumnWidth, cursorSpan)
                 Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(ScreenColors.SectionDivider))
                 Spacer(modifier = Modifier.height(6.dp))
                 LazyColumn(
@@ -232,31 +316,35 @@ private fun EpgTimelineGrid(
                         .weight(1f)
                         .fillMaxWidth()
                         .onKeyEvent { event ->
-                            // BrowseOnly ("My TV" from the rail): Right only,
-                            // browses into the future - Left is left
-                            // unhandled so it bubbles up to WithRail's Left
-                            // handler and summons the side menu, same as
-                            // every other screen.
+                            // Left/Right move the browse cursor to the
+                            // previous/next program on the cursor's channel
+                            // (Up/Down use default row focus traversal and
+                            // keep the cursor's time). Nothing here retunes
+                            // the preview - only OK does.
+                            // BrowseOnly ("My TV" from the rail): Left with
+                            // no earlier program is left unhandled so it
+                            // bubbles up to WithRail's Left handler and
+                            // summons the side menu, same as every other
+                            // screen.
                             // Embedded (reduced live view, reached via Back
-                            // from full-screen live): both directions scroll
-                            // the timeline - Left now moves backward instead
-                            // of opening anything (Back takes over that role
-                            // there, same as it does in the player) -
-                            // animateScrollBy already clamps at 0, so this
-                            // naturally stops at "now" without extra bounds
-                            // logic.
+                            // from full-screen live): Left never opens
+                            // anything (Back takes over that role there, same
+                            // as it does in the player), it just stops at the
+                            // earliest program.
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            val programs = cursorStreamId?.let { epgWindows[it] }.orEmpty()
                             when (event.key) {
                                 Key.DirectionRight -> {
-                                    coroutineScope.launch { scrollState.animateScrollBy(scrollStepPx) }
+                                    nextProgram(programs, cursorEpoch)?.let(moveCursorTo)
                                     true
                                 }
                                 Key.DirectionLeft -> {
-                                    if (mode == GuideMode.Embedded) {
-                                        coroutineScope.launch { scrollState.animateScrollBy(-scrollStepPx) }
+                                    val previous = previousProgram(programs, cursorEpoch, windowStartEpoch)
+                                    if (previous != null) {
+                                        moveCursorTo(previous)
                                         true
                                     } else {
-                                        false
+                                        mode == GuideMode.Embedded
                                     }
                                 }
                                 else -> false
@@ -272,9 +360,11 @@ private fun EpgTimelineGrid(
                             isTuned = channel.streamId == defaultStreamId,
                             scrollState = scrollState,
                             channelColumnWidth = channelColumnWidth,
-                            onPlay = { onPlay(channel) },
+                            cursorEpoch = if (channel.streamId == cursorStreamId) cursorEpoch else null,
+                            onPlay = { onOk(channel) },
                             onSetDefault = { onSetDefault(channel) },
                             onRemoveFavorite = { onRemove(channel) },
+                            recordAction = recordActionFor(channel),
                             onFocused = { onFocusedChannelChanged(channel) },
                             rowModifier = if (index == initialFocusIndex) Modifier.focusRequester(firstItemFocusRequester) else Modifier
                         )
@@ -317,7 +407,13 @@ private sealed class PreviewSource {
 }
 
 @Composable
-private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, previewSource: PreviewSource?, nowEpoch: Long) {
+private fun TopPreviewBlock(
+    previewChannel: LiveChannel?,
+    cursorChannel: LiveChannel?,
+    program: EpgProgram?,
+    previewSource: PreviewSource?,
+    nowEpoch: Long
+) {
     Row(modifier = Modifier.fillMaxWidth().height(120.dp), verticalAlignment = Alignment.Top) {
         Box(
             modifier = Modifier
@@ -328,9 +424,9 @@ private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, preview
         ) {
             when (previewSource) {
                 is PreviewSource.OwnPlayer -> LivePreview(streamUrl = previewSource.streamUrl, modifier = Modifier.fillMaxSize())
-                null -> if (channel != null) {
+                null -> if (previewChannel != null) {
                     AsyncImage(
-                        model = channel.streamIcon,
+                        model = previewChannel.streamIcon,
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize().padding(24.dp)
@@ -345,21 +441,26 @@ private fun TopPreviewBlock(channel: LiveChannel?, program: EpgProgram?, preview
                 }
             }
         }
-        if (channel != null) {
+        if (cursorChannel != null) {
+            // Text follows the guide cursor (any channel, any time); only the
+            // video/icon slot on the left follows the preview channel.
             Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
                 Text(
-                    text = TitleFormat.clean(program?.title ?: channel.name),
+                    text = TitleFormat.clean(program?.title ?: "No information"),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                val channelName = TitleFormat.clean(cursorChannel.name)
+                Text(
+                    text = if (program != null) "$channelName  -  ${formatProgramTimes(program, nowEpoch)}" else channelName,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 if (program != null) {
-                    Text(
-                        text = "${formatTime(program.startEpochSeconds)} - ${formatTime(program.stopEpochSeconds)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                     if (program.description.isNotBlank()) {
                         Text(
                             text = program.description,
@@ -459,8 +560,10 @@ private fun GuideHeader(
     favorites: List<LiveChannel>,
     epgWindows: Map<Int, List<EpgProgram>>,
     scrollState: ScrollState,
-    channelColumnWidth: androidx.compose.ui.unit.Dp
+    channelColumnWidth: androidx.compose.ui.unit.Dp,
+    cursorSpan: Pair<Long, Long>?
 ) {
+    val accent = LocalAppColors.current.vividAccent
     val windowEndEpoch = windowEndEpoch(favorites, epgWindows, windowStartEpoch)
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         // Title of the channel column, in the space left of the time labels -
@@ -484,11 +587,28 @@ private fun GuideHeader(
                 val firstSlot = ((windowStartEpoch / HalfHourSeconds) + 1) * HalfHourSeconds
                 var slotEpoch = max(firstSlot, ((visStart / HalfHourSeconds) + 1) * HalfHourSeconds)
                 val lastSlot = min(windowEndEpoch, visEnd)
+                // Green bar under the time labels over the cursor program's
+                // start-to-stop span, so you can see which period you're on.
+                if (cursorSpan != null) {
+                    val spanStart = max(cursorSpan.first, windowStartEpoch)
+                    if (spanStart < cursorSpan.second) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .offset(x = ((spanStart - windowStartEpoch) / 60f * PxPerMinute).dp)
+                                .width(((cursorSpan.second - spanStart) / 60f * PxPerMinute).dp.coerceAtLeast(2.dp))
+                                .height(1.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(accent)
+                        )
+                    }
+                }
                 while (slotEpoch < lastSlot) {
                     val offsetMinutes = (slotEpoch - windowStartEpoch) / 60f
+                    val inCursorSpan = cursorSpan != null && slotEpoch >= cursorSpan.first && slotEpoch < cursorSpan.second
                     Text(
                         text = formatTime(slotEpoch),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (inCursorSpan) accent else MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.offset(x = (offsetMinutes * PxPerMinute).dp)
                     )
@@ -511,9 +631,13 @@ private fun EpgChannelRow(
     isTuned: Boolean,
     scrollState: ScrollState,
     channelColumnWidth: androidx.compose.ui.unit.Dp,
+    // Non-null only on the cursor's row; the program/gap containing it gets
+    // the green highlight (while this row has D-pad focus).
+    cursorEpoch: Long?,
     onPlay: () -> Unit,
     onSetDefault: () -> Unit,
     onRemoveFavorite: () -> Unit,
+    recordAction: MenuAction?,
     onFocused: () -> Unit,
     rowModifier: Modifier = Modifier
 ) {
@@ -521,6 +645,7 @@ private fun EpgChannelRow(
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
     var menuExpanded by remember { mutableStateOf(false) }
+    var confirmRemoveExpanded by remember { mutableStateOf(false) }
 
     // Drives the top preview block: whichever row the D-pad lands on becomes
     // the live audio/video + description shown above, without leaving this
@@ -529,15 +654,12 @@ private fun EpgChannelRow(
         if (isFocused) onFocused()
     }
 
-    // Per-row focus tint (§6.3): a faint wash of the vivid accent over the
-    // guide's near-black background, not a flat color swap - keeps this
-    // distinct from the "currently playing" cell's plain gray highlight.
-    val focusedRowTint = appColors.vividAccent.copy(alpha = 0.06f).compositeOver(ScreenColors.FavoritesBackground)
-    // Focus (white text + green row tint) is now the only highlight state a
-    // row gets - the default/tuned channel no longer gets a permanent green
-    // name color, since that read as a confusing second "selected" state
-    // once focus navigation between rows was added. isTuned still drives the
-    // "currently playing" cell logic below and the RowActionsMenu toggle.
+    // The focused row gets no background of its own (user request
+    // 2026-09-20) - the green cursor cell and the white channel name are the
+    // only signs of where you are. The default/tuned channel no longer gets
+    // a permanent green name color, since that read as a confusing second
+    // "selected" state. isTuned still drives the "currently playing" cell
+    // logic below and the RowActionsMenu toggle.
     val nameColor = if (isFocused) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
 
     // No scale/border/glow here, unlike the app's standard §5 card recipe -
@@ -555,8 +677,8 @@ private fun EpgChannelRow(
             modifier = Modifier.fillMaxWidth().height(RowHeight).then(rowModifier),
             colors = CardDefaults.colors(
                 containerColor = Color.Transparent,
-                focusedContainerColor = focusedRowTint,
-                pressedContainerColor = focusedRowTint
+                focusedContainerColor = Color.Transparent,
+                pressedContainerColor = Color.Transparent
             ),
             scale = CardDefaults.scale(scale = 1f, focusedScale = 1f, pressedScale = 1f),
             border = CardDefaults.border(
@@ -608,11 +730,13 @@ private fun EpgChannelRow(
                         computeGaps(visiblePrograms, max(windowStartEpoch, visStart), min(rowWindowEnd, visEnd)).forEach { (gapStart, gapEnd) ->
                             val startMinutes = (gapStart - windowStartEpoch) / 60f
                             val durationMinutes = (gapEnd - gapStart) / 60f
+                            val gapHasCursor = isFocused && cursorEpoch != null && cursorEpoch >= gapStart && cursorEpoch < gapEnd
                             Box(
                                 modifier = Modifier
                                     .offset(x = (startMinutes * PxPerMinute).dp)
                                     .width(((durationMinutes * PxPerMinute).dp).coerceAtLeast(2.dp))
                                     .fillMaxHeight()
+                                    .then(if (gapHasCursor) Modifier.cursorHighlight() else Modifier)
                                     .drawBehind {
                                         drawLine(
                                             color = appColors.surfaceContainer,
@@ -624,7 +748,7 @@ private fun EpgChannelRow(
                             ) {
                                 Text(
                                     text = "No information",
-                                    color = ScreenColors.MutedQualityTag,
+                                    color = if (gapHasCursor) ScreenColors.FavoritesBackground else ScreenColors.MutedQualityTag,
                                     style = MaterialTheme.typography.labelSmall,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -638,13 +762,17 @@ private fun EpgChannelRow(
                                 val startMinutes = (clampedStart - windowStartEpoch) / 60f
                                 val durationMinutes = (program.stopEpochSeconds - clampedStart) / 60f
                                 val isCurrent = nowEpoch in program.startEpochSeconds until program.stopEpochSeconds
+                                val hasCursor = isFocused && cursorEpoch != null &&
+                                    cursorEpoch >= program.startEpochSeconds && cursorEpoch < program.stopEpochSeconds
                                 Box(
                                     modifier = Modifier
                                         .offset(x = (startMinutes * PxPerMinute).dp)
                                         .width(((durationMinutes * PxPerMinute).dp).coerceAtLeast(2.dp))
                                         .fillMaxHeight()
                                         .then(
-                                            if (isCurrent) {
+                                            if (hasCursor) {
+                                                Modifier.cursorHighlight()
+                                            } else if (isCurrent) {
                                                 Modifier.padding(horizontal = 1.dp).clip(RoundedCornerShape(3.dp)).background(ScreenColors.CurrentlyPlayingCell)
                                             } else {
                                                 Modifier
@@ -661,7 +789,11 @@ private fun EpgChannelRow(
                                 ) {
                                     Text(
                                         text = TitleFormat.clean(program.title),
-                                        color = if (isCurrent) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = when {
+                                            hasCursor -> ScreenColors.FavoritesBackground
+                                            isCurrent -> MaterialTheme.colorScheme.onSurface
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
@@ -677,14 +809,74 @@ private fun EpgChannelRow(
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(appColors.surfaceContainer))
     }
 
+    // Removing a favorite is the destructive one: last in the list, and it
+    // asks again (a long press in the guide used to remove it outright).
     RowActionsMenu(
         expanded = menuExpanded,
         onDismiss = { menuExpanded = false },
-        actions = listOf(
-            MenuAction("Remove from Favorite", onRemoveFavorite),
-            MenuAction(if (isTuned) "Remove Default" else "Set as Default", onSetDefault)
+        actions = listOfNotNull(
+            recordAction,
+            MenuAction(if (isTuned) "Remove Default" else "Set as Default", onSetDefault),
+            MenuAction("Remove from Favorite...", { confirmRemoveExpanded = true }, isDestructive = true)
         )
     )
+    RowActionsMenu(
+        expanded = confirmRemoveExpanded,
+        onDismiss = { confirmRemoveExpanded = false },
+        actions = listOf(
+            MenuAction("Cancel", {}),
+            MenuAction("Yes, remove from Favorites", onRemoveFavorite, isDestructive = true)
+        )
+    )
+}
+
+// The browse cursor's cell: solid fill in the user's accent green, no border.
+// Visibly different from the plain gray "currently playing" cell
+// (STYLE_GUIDE.md §6.3).
+@Composable
+private fun Modifier.cursorHighlight(): Modifier {
+    val accent = LocalAppColors.current.vividAccent
+    return this
+        .padding(horizontal = 1.dp)
+        .clip(RoundedCornerShape(3.dp))
+        .background(accent)
+}
+
+private fun windowStartFor(nowEpoch: Long): Long = (nowEpoch / HalfHourSeconds) * HalfHourSeconds
+
+private fun programAt(programs: List<EpgProgram>, epoch: Long): EpgProgram? =
+    programs.firstOrNull { epoch >= it.startEpochSeconds && epoch < it.stopEpochSeconds }
+
+private fun nextProgram(programs: List<EpgProgram>, epoch: Long): EpgProgram? =
+    programs.filter { it.startEpochSeconds > epoch }.minByOrNull { it.startEpochSeconds }
+
+// Only programs still visible in the grid (ending after windowStartEpoch) count,
+// so Left stops at what's drawn.
+private fun previousProgram(programs: List<EpgProgram>, epoch: Long, windowStartEpoch: Long): EpgProgram? {
+    val from = programAt(programs, epoch)?.startEpochSeconds ?: epoch
+    return programs
+        .filter { it.startEpochSeconds < from && it.stopEpochSeconds > windowStartEpoch }
+        .maxByOrNull { it.startEpochSeconds }
+}
+
+// Start-to-stop of the program under the cursor, or of the "No information"
+// gap it sits in.
+private fun spanAtCursor(programs: List<EpgProgram>, epoch: Long, windowStartEpoch: Long): Pair<Long, Long> {
+    programAt(programs, epoch)?.let { return it.startEpochSeconds to it.stopEpochSeconds }
+    val gapStart = programs.filter { it.stopEpochSeconds <= epoch }.maxOfOrNull { it.stopEpochSeconds } ?: windowStartEpoch
+    val gapEnd = programs.filter { it.startEpochSeconds > epoch }.minOfOrNull { it.startEpochSeconds }
+        ?: windowEndEpochForRow(programs, windowStartEpoch)
+    return max(gapStart, windowStartEpoch) to gapEnd
+}
+
+// Adds the weekday when the program isn't today, since the guide now shows
+// programs days ahead.
+private fun formatProgramTimes(program: EpgProgram, nowEpoch: Long): String {
+    val range = "${formatTime(program.startEpochSeconds)} - ${formatTime(program.stopEpochSeconds)}"
+    val day = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    val startDate = Date(program.startEpochSeconds * 1000)
+    if (day.format(startDate) == day.format(Date(nowEpoch * 1000))) return range
+    return "${SimpleDateFormat("EEE", Locale.getDefault()).format(startDate)} $range"
 }
 
 private fun windowEndEpoch(favorites: List<LiveChannel>, epgWindows: Map<Int, List<EpgProgram>>, windowStartEpoch: Long): Long {

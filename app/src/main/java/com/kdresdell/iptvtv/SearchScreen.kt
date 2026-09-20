@@ -228,7 +228,10 @@ fun SearchScreen(
         // and Left from any pill predictably opens the side rail like every
         // other list in the app (see WithRail in SideRail.kt).
         if (query.isBlank() && history.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // weight(1f): takes only the height left under the KPI row and
+            // search field, so the pill list below can scroll instead of
+            // running off the bottom of the screen.
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -278,8 +281,8 @@ fun SearchScreen(
                         )
                     }
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    history.forEachIndexed { index, term ->
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    itemsIndexed(history) { index, term ->
                         HistoryPill(
                             term = term,
                             // Same focus-loss fix as the trash button above:
