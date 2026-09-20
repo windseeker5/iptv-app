@@ -32,7 +32,7 @@ class FavoritesStore(context: Context) {
 
     private fun save(channels: List<LiveChannel>) {
         val array = JSONArray()
-        channels.forEach { channel ->
+        channels.filterNot { DoorbellChannel.isDoorbell(it.streamId) }.forEach { channel ->
             array.put(
                 JSONObject().apply {
                     put("stream_id", channel.streamId)

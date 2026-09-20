@@ -1,7 +1,6 @@
 package com.kdresdell.iptvtv
 
 import android.content.Context
-import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -42,7 +41,7 @@ class LivePlaybackHolder(context: Context) {
     fun tune(streamId: Int, streamUrl: String) {
         if (currentStreamId == streamId) return
         currentStreamId = streamId
-        player.setMediaItem(MediaItem.fromUri(streamUrl))
+        player.setLiveStream(streamUrl)
         player.prepare()
         player.playWhenReady = true
     }

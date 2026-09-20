@@ -44,6 +44,12 @@ fun ChannelListScreen(
     onBack: () -> Unit
 ) {
     val firstItemFocus = remember { FocusRequester() }
+    // Up from the first channel goes to the Back button as before, so the
+    // wrap to the last channel happens from the Back button instead.
+    val wrap = rememberListWrap(
+        count = (state as? LoadState.Success)?.data?.size ?: 0,
+        wrapUpFromFirst = false
+    )
 
     // See CategoryListScreen for why this is needed - without it, D-pad
     // focus lands nowhere when this screen opens.
@@ -64,6 +70,7 @@ fun ChannelListScreen(
         ) {
             IconButton(
                 onClick = onBack,
+                modifier = wrap.upFromAbove,
                 scale = appIconButtonScale(),
                 border = appIconButtonBorder(),
                 glow = appIconButtonGlow(),
@@ -105,8 +112,9 @@ fun ChannelListScreen(
             }
             is LoadState.Success -> {
                 LazyColumn(
+                    state = wrap.listState,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(horizontal = 48.dp, vertical = 8.dp)
+                    modifier = Modifier.padding(horizontal = 48.dp, vertical = 8.dp).then(wrap.keys)
                 ) {
                     itemsIndexed(state.data) { index, channel ->
                         ChannelRow(
@@ -114,7 +122,8 @@ fun ChannelListScreen(
                             isFavorite = isFavorite(channel.streamId),
                             onPlay = { onSelectChannel(channel) },
                             onToggleFavorite = { onToggleFavorite(channel) },
-                            playCardModifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
+                            playCardModifier = (if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                                .then(wrap.itemModifier(index))
                         )
                     }
                 }

@@ -53,7 +53,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Border
@@ -271,6 +270,9 @@ private fun EpgTimelineGrid(
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
     val firstItemFocusRequester = remember { FocusRequester() }
+    // Up on the first channel / Down on the last wraps around. The time
+    // cursor is untouched by a wrap: it lives in cursorEpoch, not the row.
+    val wrap = rememberListWrap(count = favorites.size)
     val initialFocusIndex = remember(favorites, initialFocusStreamId) {
         initialFocusStreamId?.let { id -> favorites.indexOfFirst { it.streamId == id } }
             ?.takeIf { it >= 0 } ?: 0
@@ -312,9 +314,11 @@ private fun EpgTimelineGrid(
                 Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(ScreenColors.SectionDivider))
                 Spacer(modifier = Modifier.height(6.dp))
                 LazyColumn(
+                    state = wrap.listState,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .then(wrap.keys)
                         .onKeyEvent { event ->
                             // Left/Right move the browse cursor to the
                             // previous/next program on the cursor's channel
@@ -366,7 +370,8 @@ private fun EpgTimelineGrid(
                             onRemoveFavorite = { onRemove(channel) },
                             recordAction = recordActionFor(channel),
                             onFocused = { onFocusedChannelChanged(channel) },
-                            rowModifier = if (index == initialFocusIndex) Modifier.focusRequester(firstItemFocusRequester) else Modifier
+                            rowModifier = (if (index == initialFocusIndex) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
+                                .then(wrap.itemModifier(index))
                         )
                     }
                 }
@@ -493,7 +498,7 @@ private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val exoPlayer = remember(streamUrl) {
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(streamUrl))
+            setLiveStream(streamUrl)
             prepare()
             playWhenReady = true
         }

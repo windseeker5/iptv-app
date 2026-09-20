@@ -18,13 +18,40 @@ private fun normalizeForSearch(text: String): String =
         .replace(Regex("\\p{Mn}+"), "")
         .lowercase()
 
+// What's New's two languages, as SQL on the provider's language-prefixed
+// names ("EN - Moana", "FR - Dune", "QC - Loups-Garous") plus the title's
+// ORIGINAL language from TMDB (in ratings.json). The original language is what
+// keeps French dubbed or subtitled versions of English shows and films out of
+// the French rows (and anime dubs out of the English ones). GLOB is
+// case-sensitive so a title like "Frozen" is never mistaken for "FR".
+enum class WhatsNewLanguage(val originalLanguage: String) {
+    English("en"), French("fr");
+
+    fun nameFilter(column: String): String = when (this) {
+        English -> "$column GLOB 'EN[ :.-]*'"
+        French -> "($column GLOB 'FR[ :.-]*' OR $column GLOB 'QC[ :.-]*')"
+    }
+}
+
+// A score from only a handful of people is not a recommendation (a title with
+// 7 votes can sit at 7.8). Small on purpose: French productions get few IMDb
+// votes, a high floor would empty the French rows. 2026-09-20, user's call.
+private const val MIN_IMDB_VOTES = 25
+
+// One IMDb score from the server's ratings.json.
+data class ImdbScore(val rating: Double, val votes: Int, val language: String)
+
 // Local cache of the full live-channel catalog. Search needs this because
 // a real provider's catalog can be huge (tens of thousands of channels) -
 // holding that as an in-memory Kotlin List and re-filtering it on every
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 11) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 14) {
+
+    // When the movie/series lists were last downloaded - What's New uses it
+    // to refresh them daily (they otherwise only ever synced when empty).
+    private val syncPrefs = context.getSharedPreferences("catalog_sync", Context.MODE_PRIVATE)
 
     init {
         // WAL mode lets concurrent readers proceed without blocking behind
@@ -48,6 +75,7 @@ class LiveChannelDatabase(context: Context) :
         createEpgSyncTables(db)
         createVodDetailsTable(db)
         createSeriesDetailsTables(db)
+        createImdbRatingsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -100,6 +128,28 @@ class LiveChannelDatabase(context: Context) :
             db.execSQL("DELETE FROM channel_epg_window")
             createEpgSyncTables(db)
         }
+        if (oldVersion < 12) {
+            db.execSQL("ALTER TABLE vod_streams ADD COLUMN release_year INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE series ADD COLUMN release_year INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 13) {
+            // What's New: the provider's TMDB id per title, plus the IMDb
+            // score table. Existing rows have no tmdb/year yet, so mark both
+            // lists as never downloaded - the daily background refresh then
+            // re-downloads them (see CatalogRefresher).
+            db.execSQL("ALTER TABLE vod_streams ADD COLUMN tmdb INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE series ADD COLUMN tmdb INTEGER NOT NULL DEFAULT 0")
+            createImdbRatingsTable(db)
+            syncPrefs.edit().putLong("vod_synced_at", 0L).putLong("series_synced_at", 0L).apply()
+        }
+        if (oldVersion < 14) {
+            // Scores now carry the title's original language (real French /
+            // Quebec productions vs dubbed or subtitled ones). The table is a
+            // download cache, so rebuild it and fetch the new file.
+            db.execSQL("DROP TABLE IF EXISTS imdb_ratings")
+            createImdbRatingsTable(db)
+            syncPrefs.edit().putLong("ratings_synced_at", 0L).apply()
+        }
     }
 
     // Without an explicit transaction, SQLite commits (fsyncs) after every
@@ -149,7 +199,9 @@ class LiveChannelDatabase(context: Context) :
                 category_id TEXT NOT NULL,
                 stream_icon TEXT NOT NULL DEFAULT '',
                 container_extension TEXT NOT NULL DEFAULT 'mp4',
-                name_normalized TEXT NOT NULL DEFAULT ''
+                name_normalized TEXT NOT NULL DEFAULT '',
+                release_year INTEGER NOT NULL DEFAULT 0,
+                tmdb INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -163,7 +215,9 @@ class LiveChannelDatabase(context: Context) :
                 name TEXT NOT NULL,
                 category_id TEXT NOT NULL,
                 cover TEXT NOT NULL DEFAULT '',
-                name_normalized TEXT NOT NULL DEFAULT ''
+                name_normalized TEXT NOT NULL DEFAULT '',
+                release_year INTEGER NOT NULL DEFAULT 0,
+                tmdb INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -602,7 +656,7 @@ class LiveChannelDatabase(context: Context) :
         try {
             db.execSQL("DELETE FROM vod_streams")
             val statement = db.compileStatement(
-                "INSERT OR REPLACE INTO vod_streams (stream_id, name, category_id, stream_icon, container_extension, name_normalized) VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO vod_streams (stream_id, name, category_id, stream_icon, container_extension, name_normalized, release_year, tmdb) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             var count = 0
             for (stream in streams) {
@@ -613,6 +667,8 @@ class LiveChannelDatabase(context: Context) :
                 statement.bindString(4, stream.streamIcon)
                 statement.bindString(5, stream.containerExtension)
                 statement.bindString(6, normalizeForSearch(stream.name))
+                statement.bindLong(7, stream.releaseYear.toLong())
+                statement.bindLong(8, stream.tmdb.toLong())
                 statement.executeInsert()
                 count++
                 if (count % 250 == 0) {
@@ -620,10 +676,14 @@ class LiveChannelDatabase(context: Context) :
                 }
             }
             onProgress(count)
+            // Providers sometimes answer with an empty list while they
+            // rebuild their catalog - never let that wipe what we have.
+            if (count == 0) throw XtreamApiException("Provider sent an empty movie list - kept the saved one")
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
+        syncPrefs.edit().putLong("vod_synced_at", System.currentTimeMillis()).apply()
     }
 
     // Same "streamed insert into SQLite" reasoning as replaceAll, for the
@@ -634,7 +694,7 @@ class LiveChannelDatabase(context: Context) :
         try {
             db.execSQL("DELETE FROM series")
             val statement = db.compileStatement(
-                "INSERT OR REPLACE INTO series (series_id, name, category_id, cover, name_normalized) VALUES (?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO series (series_id, name, category_id, cover, name_normalized, release_year, tmdb) VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             var count = 0
             for (show in series) {
@@ -644,6 +704,8 @@ class LiveChannelDatabase(context: Context) :
                 statement.bindString(3, show.categoryId)
                 statement.bindString(4, show.cover)
                 statement.bindString(5, normalizeForSearch(show.name))
+                statement.bindLong(6, show.releaseYear.toLong())
+                statement.bindLong(7, show.tmdb.toLong())
                 statement.executeInsert()
                 count++
                 if (count % 250 == 0) {
@@ -651,10 +713,133 @@ class LiveChannelDatabase(context: Context) :
                 }
             }
             onProgress(count)
+            if (count == 0) throw XtreamApiException("Provider sent an empty series list - kept the saved one")
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
+        syncPrefs.edit().putLong("series_synced_at", System.currentTimeMillis()).apply()
+    }
+
+    // Empty, never downloaded with the What's New fields, or older than
+    // maxAgeMillis.
+    fun isVodStale(maxAgeMillis: Long): Boolean =
+        isVodEmpty() || System.currentTimeMillis() - syncPrefs.getLong("vod_synced_at", 0L) > maxAgeMillis
+
+    fun isSeriesStale(maxAgeMillis: Long): Boolean =
+        isSeriesEmpty() || System.currentTimeMillis() - syncPrefs.getLong("series_synced_at", 0L) > maxAgeMillis
+
+    // ---- What's New -------------------------------------------------
+    // IMDb scores per TMDB id, downloaded from the KD server by
+    // CatalogRefresher (kind is "movie" or "tv"). The screen only ever reads
+    // this table - nothing is looked up while it is open.
+    private fun createImdbRatingsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS imdb_ratings (
+                kind TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL,
+                rating REAL NOT NULL,
+                votes INTEGER NOT NULL,
+                lang TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (kind, tmdb_id)
+            )
+            """.trimIndent()
+        )
+    }
+
+    // An empty download (server file missing/broken) is ignored so it can
+    // never blank out the scores we already have.
+    fun replaceImdbRatings(movies: Map<Int, ImdbScore>, series: Map<Int, ImdbScore>): Boolean {
+        if (movies.isEmpty() && series.isEmpty()) return false
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM imdb_ratings")
+            val statement = db.compileStatement("INSERT OR REPLACE INTO imdb_ratings (kind, tmdb_id, rating, votes, lang) VALUES (?, ?, ?, ?, ?)")
+            for ((kind, map) in listOf("movie" to movies, "tv" to series)) {
+                for ((tmdbId, score) in map) {
+                    statement.clearBindings()
+                    statement.bindString(1, kind)
+                    statement.bindLong(2, tmdbId.toLong())
+                    statement.bindDouble(3, score.rating)
+                    statement.bindLong(4, score.votes.toLong())
+                    statement.bindString(5, score.language)
+                    statement.executeInsert()
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        syncPrefs.edit().putLong("ratings_synced_at", System.currentTimeMillis()).apply()
+        return true
+    }
+
+    fun isRatingsStale(maxAgeMillis: Long): Boolean =
+        System.currentTimeMillis() - syncPrefs.getLong("ratings_synced_at", 0L) > maxAgeMillis
+
+    fun hasImdbRatings(): Boolean {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM imdb_ratings", null).use { cursor ->
+            cursor.moveToFirst()
+            return cursor.getInt(0) > 0
+        }
+    }
+
+    // Recent releases (minYear and later) in the given language, best IMDb
+    // score first, at least MIN_IMDB_VOTES votes. Titles
+    // the provider lists more than once (same tmdb id) show once.
+    fun topMovies(language: WhatsNewLanguage, minYear: Int, limit: Int = 10): List<VodStream> {
+        val results = mutableListOf<VodStream>()
+        readableDatabase.rawQuery(
+            "SELECT v.stream_id, v.name, v.category_id, v.stream_icon, v.container_extension, v.release_year, v.tmdb, r.rating " +
+                "FROM vod_streams v JOIN imdb_ratings r ON r.kind = 'movie' AND r.tmdb_id = v.tmdb " +
+                "WHERE ${language.nameFilter("v.name")} AND r.lang = ? AND r.votes >= $MIN_IMDB_VOTES AND v.release_year >= ? " +
+                "GROUP BY v.tmdb ORDER BY r.rating DESC, r.votes DESC LIMIT ?",
+            arrayOf(language.originalLanguage, minYear.toString(), limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    VodStream(
+                        streamId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        streamIcon = cursor.getString(3),
+                        containerExtension = cursor.getString(4),
+                        releaseYear = cursor.getInt(5),
+                        tmdb = cursor.getInt(6),
+                        imdbRating = cursor.getDouble(7)
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    fun topSeries(language: WhatsNewLanguage, minYear: Int, limit: Int = 10): List<SeriesShow> {
+        val results = mutableListOf<SeriesShow>()
+        readableDatabase.rawQuery(
+            "SELECT v.series_id, v.name, v.category_id, v.cover, v.release_year, v.tmdb, r.rating " +
+                "FROM series v JOIN imdb_ratings r ON r.kind = 'tv' AND r.tmdb_id = v.tmdb " +
+                "WHERE ${language.nameFilter("v.name")} AND r.lang = ? AND r.votes >= $MIN_IMDB_VOTES AND v.release_year >= ? " +
+                "GROUP BY v.tmdb ORDER BY r.rating DESC, r.votes DESC LIMIT ?",
+            arrayOf(language.originalLanguage, minYear.toString(), limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    SeriesShow(
+                        seriesId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        cover = cursor.getString(3),
+                        releaseYear = cursor.getInt(4),
+                        tmdb = cursor.getInt(5),
+                        imdbRating = cursor.getDouble(6)
+                    )
+                )
+            }
+        }
+        return results
     }
 
     // Searches all three indexes and returns a combined, type-tagged

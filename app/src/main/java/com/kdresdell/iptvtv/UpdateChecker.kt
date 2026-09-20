@@ -10,7 +10,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 
-private const val VERSION_URL = "https://apk.dresdell.com/version.json"
+// The landing page serves the version info; apk.dresdell.com only serves the
+// package itself (the "url" inside this file points there).
+private const val VERSION_URL = "https://omt.dresdell.com/version.json"
 
 data class UpdateInfo(
     val versionCode: Int,

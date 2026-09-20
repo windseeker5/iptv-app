@@ -158,6 +158,15 @@ fun SearchScreen(
     val liveIsFirstSection = liveResults.isNotEmpty()
     val vodIsFirstSection = !liveIsFirstSection && vodResults.isNotEmpty()
     val seriesIsFirstSection = !liveIsFirstSection && !vodIsFirstSection && seriesResults.isNotEmpty()
+    // Wrap-around runs across all sections as one list: Down on the very last
+    // result goes to the very first. Each non-empty section adds one header
+    // item ahead of its rows. Up from the first result still goes to the
+    // search field, so no wrap that way.
+    val resultWrap = rememberListWrap(
+        count = results.size,
+        headerCount = listOf(liveResults, vodResults, seriesResults).count { it.isNotEmpty() },
+        wrapUpFromFirst = false
+    )
 
     Column(
         modifier = Modifier
@@ -328,7 +337,11 @@ fun SearchScreen(
                 } else if (query.isNotBlank() && results.isEmpty()) {
                     Text(text = "No matches", color = onBackground)
                 }
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyColumn(
+                    state = resultWrap.listState,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = resultWrap.keys
+                ) {
                     if (liveResults.isNotEmpty()) {
                         item { ResultSectionHeader(title = "Live TV", count = liveResults.size, unit = "channels") }
                         itemsIndexed(liveResults) { index, result ->
@@ -342,7 +355,7 @@ fun SearchScreen(
                                 subtitle = nowPlaying[result.channel.streamId]?.let { "Now: ${TitleFormat.clean(it.title)}" },
                                 isDefault = defaultStreamId == result.channel.streamId,
                                 onSetDefault = { onSetDefault(result.channel) },
-                                playCardModifier = firstItemModifier,
+                                playCardModifier = firstItemModifier.then(resultWrap.itemModifier(index)),
                                 typeBadge = {
                                     ResultTypeBadge(label = "LIVE", tonalColor = MaterialTheme.colorScheme.primaryContainer)
                                 }
@@ -359,7 +372,7 @@ fun SearchScreen(
                                 isSaved = isMovieSaved(result.movie.streamId),
                                 onPlay = { onPlayVod(result.movie) },
                                 onToggleSaved = { onToggleMovieSaved(result.movie) },
-                                playCardModifier = firstItemModifier
+                                playCardModifier = firstItemModifier.then(resultWrap.itemModifier(liveResults.size + index))
                             )
                         }
                     }
@@ -373,7 +386,7 @@ fun SearchScreen(
                                 isSaved = isSeriesSaved(result.series.seriesId),
                                 onOpenEpisodes = { onOpenEpisodes(result.series) },
                                 onToggleSaved = { onToggleSeriesSaved(result.series) },
-                                playCardModifier = firstItemModifier
+                                playCardModifier = firstItemModifier.then(resultWrap.itemModifier(liveResults.size + vodResults.size + index))
                             )
                         }
                     }
