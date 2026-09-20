@@ -104,6 +104,7 @@ fun SideRail(
     // the content pane next to it - a real bug hit on real hardware where
     // Down from a rail item sometimes landed on a channel card instead of
     // the next rail item.
+    val lastItemFocusRequester = remember { FocusRequester() }
     Row(modifier = Modifier.fillMaxHeight()) {
         Column(
             modifier = Modifier
@@ -140,13 +141,27 @@ fun SideRail(
                         item = item,
                         selected = selected,
                         onSelect = onSelect,
-                        modifier = if (index == 0) Modifier.focusRequester(firstItemFocusRequester) else Modifier
+                        // Wrap-around: Up from the first item lands on the last.
+                        modifier = if (index == 0) {
+                            Modifier.focusRequester(firstItemFocusRequester)
+                                .wrapKey(Key.DirectionUp) { lastItemFocusRequester.requestFocus() }
+                        } else {
+                            Modifier
+                        }
                     )
                 }
             }
             Spacer(modifier = Modifier.weight(1f))
             RailRow(item = RailItem.Help, selected = selected, onSelect = onSelect)
-            RailRow(item = RailItem.Settings, selected = selected, onSelect = onSelect, showAlert = hasSettingsAlert)
+            RailRow(
+                item = RailItem.Settings,
+                selected = selected,
+                onSelect = onSelect,
+                showAlert = hasSettingsAlert,
+                // Wrap-around: Down from the last item lands on the first.
+                modifier = Modifier.focusRequester(lastItemFocusRequester)
+                    .wrapKey(Key.DirectionDown) { firstItemFocusRequester.requestFocus() }
+            )
         }
         // A physically-simulated elevation shadow (tried first) was barely
         // visible against bright video - confirmed on real hardware
@@ -372,5 +387,17 @@ fun WithRail(
                 firstItemFocusRequester = railFirstItemFocusRequester
             )
         }
+    }
+}
+
+// Runs onWrap on a fresh press of `wrapKey` (a held key is swallowed, so it
+// never loops around by itself). A preview handler: it runs before the
+// row's own key handling, which can swallow Down on real hardware.
+private fun Modifier.wrapKey(wrapKey: Key, onWrap: () -> Unit): Modifier = onPreviewKeyEvent { event ->
+    if (event.type == KeyEventType.KeyDown && event.key == wrapKey) {
+        if (event.nativeKeyEvent.repeatCount == 0) onWrap()
+        true
+    } else {
+        false
     }
 }
