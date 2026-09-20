@@ -127,6 +127,9 @@ fun PlayerScreen(
     // (see [[android_tv_dev_loop]] on video hot-swap ANRs).
     reduced: Boolean = false,
     guideContent: @Composable () -> Unit = {},
+    // Live-only: lets the embedded guide's long-press menu start/stop a
+    // recording of this channel (see GuideRecordingBridge).
+    guideRecording: GuideRecordingBridge? = null,
     // Back while the menu is open, live only - exits the whole app.
     onExitApp: () -> Unit = {}
 ) {
@@ -286,8 +289,10 @@ fun PlayerScreen(
             AppLog.log("Recording failed: no USB drive found")
             return
         }
+        // Keep accented letters (French titles like "Le Rêve Américain") -
+        // only characters that are unsafe in a filename become "_".
         val safeName = displayTitle.ifBlank { title }
-            .replace(Regex("[^A-Za-z0-9_-]"), "_")
+            .replace(Regex("[^\\p{L}\\p{M}\\p{N}_-]"), "_")
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val outFile = File(dir, "${safeName}_$timestamp.ts")
         isRecording = true
@@ -326,8 +331,37 @@ fun PlayerScreen(
     // this screen is left entirely - never silently keeps recording the
     // wrong thing or orphaned in the background. See DisposableEffect(Unit)
     // below for the "leaving the screen" half of that.
-    DisposableEffect(Unit) {
+    // Keyed on contentId so a channel change made from the guide (which
+    // doesn't go through the Up/Down stopRecording() calls) also ends it.
+    DisposableEffect(contentId) {
         onDispose { liveRecorder.stop() }
+    }
+
+    // Guide bridge: publish state, and act on the guide's requests.
+    LaunchedEffect(guideRecording, recordingEnabled, isRecording, recordingElapsedSeconds) {
+        guideRecording?.available = recordingEnabled && isLive
+        guideRecording?.isRecording = isRecording
+        guideRecording?.elapsedSeconds = recordingElapsedSeconds
+    }
+    DisposableEffect(guideRecording) {
+        onDispose {
+            guideRecording?.available = false
+            guideRecording?.isRecording = false
+        }
+    }
+    val requestedMinutes = guideRecording?.pendingMinutes
+    LaunchedEffect(requestedMinutes) {
+        if (requestedMinutes != null) {
+            guideRecording?.pendingMinutes = null
+            if (!isRecording) startRecording(requestedMinutes)
+        }
+    }
+    val stopRequested = guideRecording?.stopRequested == true
+    LaunchedEffect(stopRequested) {
+        if (stopRequested) {
+            guideRecording?.stopRequested = false
+            if (isRecording) stopRecording()
+        }
     }
 
     // Confirmed on real hardware (2026-09-17): pulling the USB drive
@@ -368,6 +402,17 @@ fun PlayerScreen(
     // resuming on stop makes that silence deliberate instead of a glitch.
     LaunchedEffect(isRecording) {
         exoPlayer.playWhenReady = if (isRecording) false else isPlaying
+    }
+
+    // Stopping a recording swaps the lockout screen back for the video view,
+    // which can leave keyboard focus off this screen's root - and then Back
+    // goes to Android (exits the app) instead of reducing to the guide.
+    // Reclaim focus once the swap has settled.
+    LaunchedEffect(isRecording) {
+        if (!isRecording && !reduced) {
+            delay(100)
+            focusRequester.requestFocus()
+        }
     }
 
     LaunchedEffect(isRecording) {
@@ -815,6 +860,28 @@ fun PlayerScreen(
                         modifier = Modifier.size(36.dp)
                     )
                 }
+            }
+        }
+
+        if (isRecording && isLive && reduced) {
+            // The guide shows no lockout screen, so this small badge over
+            // the (paused) preview slot is the only sign a recording is on.
+            // Same slot geometry as the video's reduced layout above.
+            Row(
+                modifier = Modifier
+                    .padding(start = 40.dp, top = 24.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.Red))
+                Text(
+                    text = "REC %d:%02d".format(recordingElapsedSeconds / 60, recordingElapsedSeconds % 60),
+                    color = Color.White,
+                    fontSize = 12.sp
+                )
             }
         }
 
