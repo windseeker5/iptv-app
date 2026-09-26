@@ -12,3 +12,8 @@ captures/
 *.jks
 *.keystore
 /local.properties
+
+# Local documentation and install guides (may contain personal info) - never pushed
+docs/
+# Dev screenshots
+android-app/screenshot*.png
