@@ -36,6 +36,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpSize
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -60,13 +71,19 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient
 
 // What the player shows. castUrl/castMimeType are what gets sent to a
 // Chromecast, which can differ from the phone's own URL (see
-// XtreamApi.liveNowPlaying).
+// XtreamApi.liveNowPlaying). kind/itemId/posterUrl/categoryId feed the
+// info panel under the video in portrait (itemId is the channel, movie or
+// series id - for an episode, its series).
 data class NowPlaying(
     val title: String,
     val streamUrl: String,
     val castUrl: String = streamUrl,
     val castMimeType: String = "video/mp4",
-    val isLive: Boolean = false
+    val isLive: Boolean = false,
+    val kind: CatalogKind? = null,
+    val itemId: Int = 0,
+    val posterUrl: String = "",
+    val categoryId: String = ""
 )
 
 // The provider sends each live channel at one fixed quality (a single .ts
@@ -130,7 +147,7 @@ private val preferSoftwareAvcSelector = MediaCodecSelector { mimeType, requiresS
 // same way YouTube behaves. Leaving the player keeps the TV playing; "Stop
 // casting" (here or in the Cast dialog) ends it and resumes on the phone.
 @Composable
-fun PlayerScreen(item: NowPlaying, onBack: () -> Unit) {
+fun PlayerScreen(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, onBack: () -> Unit) {
     val context = LocalContext.current
     val player = remember { buildPlayer(context) }
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -341,12 +358,7 @@ fun PlayerScreen(item: NowPlaying, onBack: () -> Unit) {
                     onStopCasting,
                     Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                 )
-                Text(
-                    text = "Turn your phone sideways for full screen",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(16.dp)
-                )
+                PlayerInfoPanel(item = item, db = db, api = api, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -410,3 +422,113 @@ private const val CAST_TAG = "KdtvCast"
 
 // Automatic reconnects per drop before asking the user to take over.
 private const val MAX_CAST_RETRIES = 3
+
+// What's playing, under the video in portrait (landscape is video only):
+// poster or channel logo, title, category, and the description - for a
+// live channel, the program on now from the cached guide (see
+// MainActivity's guide fetch; channels outside My TV usually have none),
+// for a movie/series its synopsis (cached, fetched once if missing).
+private data class PlayerInfo(
+    val category: String = "",
+    val nowOn: String = "",
+    val description: String = ""
+)
+
+@Composable
+private fun PlayerInfoPanel(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, modifier: Modifier) {
+    var info by remember(item) { mutableStateOf(PlayerInfo()) }
+    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    LaunchedEffect(item) {
+        val kind = item.kind ?: return@LaunchedEffect
+        while (true) {
+            info = withContext(Dispatchers.IO) {
+                val category = db.categoryNames(kind)[item.categoryId] ?: ""
+                if (kind == CatalogKind.LIVE) {
+                    val epgId = db.epgChannelIds(listOf(item.itemId))[item.itemId]
+                    val program = epgId?.let {
+                        db.programsAiringAt(listOf(it), System.currentTimeMillis() / 1000)[it]
+                    }
+                    PlayerInfo(
+                        category = category,
+                        nowOn = program?.let {
+                            "Now: ${it.title} (until ${timeFormat.format(Date(it.stopEpochSeconds * 1000))})"
+                        } ?: "",
+                        description = program?.description ?: ""
+                    )
+                } else {
+                    PlayerInfo(category = category, description = db.cachedDescription(kind, item.itemId) ?: "")
+                }
+            }
+            if (kind != CatalogKind.LIVE) {
+                if (info.description.isEmpty() && db.cachedDescription(kind, item.itemId) == null) {
+                    val fetched = if (kind == CatalogKind.VOD) {
+                        api.getVodDescription(item.itemId)
+                    } else {
+                        api.getSeriesDescription(item.itemId)
+                    }
+                    if (fetched != null) {
+                        withContext(Dispatchers.IO) { db.saveDescription(kind, item.itemId, fetched) }
+                        info = info.copy(description = fetched)
+                    }
+                }
+                break
+            }
+            // Live: move on to the next program as the guide says.
+            delay(60_000)
+        }
+    }
+
+    val isLive = item.kind == CatalogKind.LIVE
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Poster(
+                imageUrl = item.posterUrl,
+                fallbackText = item.title,
+                size = if (isLive) DpSize(96.dp, 96.dp) else DpSize(96.dp, 144.dp),
+                isLogo = isLive
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = TitleFormat.clean(item.title),
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                if (info.category.isNotBlank()) {
+                    Text(
+                        text = info.category,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (info.nowOn.isNotBlank()) {
+                    Text(
+                        text = info.nowOn,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                }
+            }
+        }
+        if (info.description.isNotBlank()) {
+            Text(
+                text = info.description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            text = "Turn your phone sideways for full screen",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.5f)
+        )
+    }
+}

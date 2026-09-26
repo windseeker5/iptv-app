@@ -12,8 +12,8 @@ android {
         applicationId = "com.kdresdell.iptvtv.phone"
         minSdk = 23
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7"
+        versionCode = 11
+        versionName = "0.11"
     }
 
     compileOptions {

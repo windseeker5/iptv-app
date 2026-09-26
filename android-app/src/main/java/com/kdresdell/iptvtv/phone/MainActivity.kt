@@ -273,7 +273,7 @@ private fun App() {
             BackHandler(enabled = screen != PhoneScreen.Home) { screen = PhoneScreen.Home }
 
             when (val current = screen) {
-                is PhoneScreen.Player -> PlayerScreen(item = current.item, onBack = { screen = PhoneScreen.Home })
+                is PhoneScreen.Player -> PlayerScreen(item = current.item, db = db, api = api, onBack = { screen = PhoneScreen.Home })
                 is PhoneScreen.Episodes -> EpisodePickerScreen(
                     series = current.series,
                     api = api,

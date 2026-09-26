@@ -341,25 +341,45 @@ class XtreamApi(private val credentials: ProviderCredentials) {
     // The phone plays the raw .ts stream, but Chromecast's default receiver
     // can't play MPEG-TS over plain HTTP - it needs HLS, which Xtream serves
     // for the same channel at .m3u8.
-    fun liveNowPlaying(name: String, streamId: Int): NowPlaying {
-        val tsUrl = liveStreamUrl(streamId)
+    fun liveNowPlaying(channel: LiveChannel): NowPlaying {
+        val tsUrl = liveStreamUrl(channel.streamId)
         return NowPlaying(
-            title = name,
+            title = channel.name,
             streamUrl = tsUrl,
             castUrl = tsUrl.removeSuffix(".ts") + ".m3u8",
             castMimeType = "application/x-mpegURL",
-            isLive = true
+            isLive = true,
+            kind = CatalogKind.LIVE,
+            itemId = channel.streamId,
+            posterUrl = channel.streamIcon,
+            categoryId = channel.categoryId
         )
     }
 
-    fun vodNowPlaying(name: String, streamId: Int, containerExtension: String): NowPlaying {
-        val url = vodStreamUrl(streamId, containerExtension)
-        return NowPlaying(name, url, url, mimeForExtension(containerExtension))
+    fun vodNowPlaying(movie: VodStream): NowPlaying {
+        val url = vodStreamUrl(movie.streamId, movie.containerExtension)
+        return NowPlaying(
+            title = movie.name,
+            streamUrl = url,
+            castMimeType = mimeForExtension(movie.containerExtension),
+            kind = CatalogKind.VOD,
+            itemId = movie.streamId,
+            posterUrl = movie.streamIcon,
+            categoryId = movie.categoryId
+        )
     }
 
-    fun episodeNowPlaying(title: String, episodeId: Int, containerExtension: String): NowPlaying {
-        val url = seriesEpisodeUrl(episodeId, containerExtension)
-        return NowPlaying(title, url, url, mimeForExtension(containerExtension))
+    fun episodeNowPlaying(series: SeriesShow, episode: SeriesEpisode): NowPlaying {
+        val url = seriesEpisodeUrl(episode.episodeId, episode.containerExtension)
+        return NowPlaying(
+            title = "${series.name} S${episode.season}E${episode.episodeNum}",
+            streamUrl = url,
+            castMimeType = mimeForExtension(episode.containerExtension),
+            kind = CatalogKind.SERIES,
+            itemId = series.seriesId,
+            posterUrl = series.cover,
+            categoryId = series.categoryId
+        )
     }
 
     private fun mimeForExtension(ext: String): String = when (ext.lowercase()) {

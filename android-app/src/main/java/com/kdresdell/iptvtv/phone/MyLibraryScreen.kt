@@ -108,7 +108,7 @@ fun MyLibraryScreen(
                     category = movieCategories[movie.categoryId] ?: "",
                     description = descriptions[movieKey(movie.streamId)] ?: "Loading description...",
                     onClick = {
-                        onPlay(api.vodNowPlaying(movie.name, movie.streamId, movie.containerExtension))
+                        onPlay(api.vodNowPlaying(movie))
                     },
                     onRemove = { removeWithUndo(movie.name) { onRemoveMovie(movie) } }
                 )
@@ -174,11 +174,7 @@ fun EpisodePickerScreen(
                             .fillMaxWidth()
                             .clickable {
                                 onPlay(
-                                    api.episodeNowPlaying(
-                                        "${series.name} S${episode.season}E${episode.episodeNum}",
-                                        episode.episodeId,
-                                        episode.containerExtension
-                                    )
+                                    api.episodeNowPlaying(series, episode)
                                 )
                             }
                             .padding(16.dp)
