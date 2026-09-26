@@ -102,8 +102,6 @@ fun SearchScreen(
     onToggleFavorite: (LiveChannel) -> Unit,
     onToggleMovieSaved: (VodStream) -> Unit,
     onToggleSeriesSaved: (SeriesShow) -> Unit,
-    defaultStreamId: Int?,
-    onSetDefault: (LiveChannel) -> Unit,
     getCachedNowPlaying: (Int) -> NowPlayingInfo?
 ) {
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
@@ -353,8 +351,6 @@ fun SearchScreen(
                                 onPlay = { onPlayLive(result.channel) },
                                 onToggleFavorite = { onToggleFavorite(result.channel) },
                                 subtitle = nowPlaying[result.channel.streamId]?.let { "Now: ${TitleFormat.clean(it.title)}" },
-                                isDefault = defaultStreamId == result.channel.streamId,
-                                onSetDefault = { onSetDefault(result.channel) },
                                 playCardModifier = firstItemModifier.then(resultWrap.itemModifier(index)),
                                 typeBadge = {
                                     ResultTypeBadge(label = "LIVE", tonalColor = MaterialTheme.colorScheme.primaryContainer)

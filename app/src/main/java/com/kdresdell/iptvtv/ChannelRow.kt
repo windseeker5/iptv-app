@@ -8,9 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -58,7 +56,7 @@ private fun LiveThumbnail(streamIcon: String) {
 
 // One focusable Card per row: short press (onClick) plays, long press
 // (onClick's onLongClick - native to tv.material3.Card, not a hand-rolled
-// hold-duration hack) opens RowActionsMenu for favorite/default. Used to be
+// hold-duration hack) opens RowActionsMenu for favorite. Used to be
 // two separate Cards (play + a big always-visible favorite button) because
 // of a since-revisited assumption that TV remotes have no reliable
 // long-press - androidx.tv.material3.Card supports it natively.
@@ -70,8 +68,6 @@ fun ChannelRow(
     onToggleFavorite: () -> Unit,
     subtitle: String? = null,
     playCardModifier: Modifier = Modifier,
-    isDefault: Boolean = false,
-    onSetDefault: (() -> Unit)? = null,
     typeBadge: (@Composable () -> Unit)? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -108,19 +104,6 @@ fun ChannelRow(
                     if (isFavorite) {
                         Text(text = "★", color = Color(0xFFA6F2A6))
                     }
-                    // Default channel gets its own marker, same small-dot
-                    // motif as the "now" indicator in the My TV EPG grid
-                    // (FavoritesScreen's tunedIndicator circle) - reusing
-                    // that existing visual language instead of inventing a
-                    // new one for the same "this is the one" concept.
-                    if (isDefault) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(LocalAppColors.current.tunedIndicator)
-                        )
-                    }
                 }
                 if (subtitle != null) {
                     // §6 "Lists": Body Medium secondary text.
@@ -139,9 +122,6 @@ fun ChannelRow(
         onDismiss = { menuExpanded = false },
         actions = buildList {
             add(MenuAction(if (isFavorite) "Remove from Favorite" else "Add to Favorite", onToggleFavorite))
-            if (onSetDefault != null) {
-                add(MenuAction(if (isDefault) "Remove Default" else "Set as Default", onSetDefault))
-            }
         }
     )
 }

@@ -642,10 +642,14 @@ class LiveChannelDatabase(context: Context) :
                 }
             }
             onProgress(count)
+            // Same empty-list guard as the movie and series lists - a manual
+            // refresh from Settings must never wipe a working channel list.
+            if (count == 0) throw XtreamApiException("Provider sent an empty channel list - kept the saved one")
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
+        syncPrefs.edit().putLong("live_synced_at", System.currentTimeMillis()).apply()
     }
 
     // Same "streamed insert into SQLite" reasoning as replaceAll, for the
@@ -775,6 +779,14 @@ class LiveChannelDatabase(context: Context) :
         syncPrefs.edit().putLong("ratings_synced_at", System.currentTimeMillis()).apply()
         return true
     }
+
+    // Settings' "Last updated" line: the most recent time any of the three
+    // provider lists was downloaded, or null if never (or only before this
+    // was tracked for live channels).
+    fun lastCatalogSyncMillis(): Long? =
+        listOf("live_synced_at", "vod_synced_at", "series_synced_at")
+            .maxOf { syncPrefs.getLong(it, 0L) }
+            .takeIf { it > 0L }
 
     fun isRatingsStale(maxAgeMillis: Long): Boolean =
         System.currentTimeMillis() - syncPrefs.getLong("ratings_synced_at", 0L) > maxAgeMillis

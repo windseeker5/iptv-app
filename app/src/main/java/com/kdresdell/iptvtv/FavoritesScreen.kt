@@ -33,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -83,10 +84,11 @@ import kotlinx.coroutines.launch
 // dense EPG grid needs the app's smallest official roles (Label Small/Medium),
 // not the roles built for headline/list content.
 //
-// Top preview: a real live decode of the tuned (default) channel, with real
-// audio - this is "the live stream you're actually listening to", carried
-// over from the player (whose own playback stops when you navigate here).
-// Falls back to a neutral placeholder if no default channel is set.
+// Top preview: a real live decode of the tuned channel (the last one
+// watched), with real audio - this is "the live stream you're actually
+// listening to", carried over from the player (whose own playback stops
+// when you navigate here). Falls back to a neutral placeholder if nothing
+// has been watched yet.
 private const val ChannelColumnFraction = 0.26f
 private val RowHeight = 44.dp
 private const val PxPerMinute = 3.2f
@@ -94,6 +96,9 @@ private const val HalfHourSeconds = 30 * 60L
 // D-pad right/left scrolls the timeline by this many minutes at a time, to
 // browse future/past programs without leaving the guide row focus.
 private const val ScrollStepMinutes = 30f
+// Recording length when a channel has no guide info for right now (see
+// recordActionFor) - long enough for a hockey game with overtime.
+private const val NO_GUIDE_RECORD_MINUTES = 180
 
 // BrowseOnly is today's "My TV" screen, reached from the rail, unchanged.
 // Embedded is the guide shown while watching live (Back from full-screen):
@@ -110,11 +115,10 @@ enum class GuideMode { BrowseOnly, Embedded }
 fun FavoritesScreen(
     favorites: List<LiveChannel>,
     epgWindows: Map<Int, List<EpgProgram>>,
-    defaultStreamId: Int?,
+    tunedStreamId: Int?,
     streamUrlFor: (Int) -> String,
     onPlay: (LiveChannel) -> Unit,
     onRemove: (LiveChannel) -> Unit,
-    onSetDefault: (LiveChannel) -> Unit,
     mode: GuideMode = GuideMode.BrowseOnly,
     // Recording from the long-press menu: `recording` is the player's live
     // state (see GuideRecordingBridge, null when no player is mounted);
@@ -125,7 +129,10 @@ fun FavoritesScreen(
     // keep every existing BrowseOnly call site unchanged.
     tunedChannel: LiveChannel? = null,
     onChannelTuned: (LiveChannel) -> Unit = {},
-    onExpand: () -> Unit = {}
+    onExpand: () -> Unit = {},
+    // BrowseOnly only - see WithRail's onDirectionLeft doc. Left/null default
+    // for every other call site (Embedded has no WithRail ancestor to hook).
+    onProvideDirectionLeftHandler: ((() -> Boolean) -> Unit)? = null
 ) {
     val nowEpoch = rememberNowEpochSeconds()
 
@@ -139,24 +146,31 @@ fun FavoritesScreen(
             return@Box
         }
 
-        val defaultTunedChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
+        val lastTunedChannel = tunedStreamId?.let { id -> favorites.find { it.streamId == id } }
         // The top preview follows whichever row currently has D-pad focus (not
-        // necessarily the default/tuned channel) - lets you browse the guide
+        // necessarily the tuned channel) - lets you browse the guide
         // and hear/see each channel's own live audio + description without
         // leaving this screen. Starts on the tuned channel since that's where
         // initial focus lands in the grid below.
         // Moving around the guide no longer retunes anything: previewChannel
         // only changes on OK (see onOk below).
-        var previewChannel by remember { mutableStateOf(defaultTunedChannel) }
-        val displayedChannel = if (mode == GuideMode.Embedded) tunedChannel else (previewChannel ?: defaultTunedChannel)
+        var previewChannel by remember { mutableStateOf(lastTunedChannel) }
+        val displayedChannel = if (mode == GuideMode.Embedded) tunedChannel else (previewChannel ?: lastTunedChannel)
 
         // The browse cursor: which channel row + which moment in time the
         // D-pad is on. The info panel and the green highlight follow it; the
         // preview (displayedChannel) does not.
         val windowStartEpoch = windowStartFor(nowEpoch)
         var cursorEpoch by remember { mutableStateOf(nowEpoch) }
+        // Falls back to the first favorite when the tuned/last-watched channel
+        // isn't one (e.g. last watched via Search, not from My TV) - without
+        // this, cursorStreamId stayed null and no row ever matched it, so the
+        // green cursor silently never appeared anywhere in the guide.
         var cursorStreamId by remember {
-            mutableStateOf(if (mode == GuideMode.Embedded) tunedChannel?.streamId else defaultTunedChannel?.streamId)
+            mutableStateOf(
+                (if (mode == GuideMode.Embedded) tunedChannel?.streamId else lastTunedChannel?.streamId)
+                    ?: favorites.firstOrNull()?.streamId
+            )
         }
         val effectiveCursorEpoch = max(cursorEpoch, windowStartEpoch)
         val cursorChannel = favorites.find { it.streamId == cursorStreamId } ?: displayedChannel
@@ -189,6 +203,13 @@ fun FavoritesScreen(
                     val minutes = ((cursorProgram.stopEpochSeconds - nowEpoch + 59) / 60).toInt().coerceAtLeast(1)
                     MenuAction("Record this show", { onRecordShow(channel, minutes) })
                 }
+                // No guide info for right now (pay-per-view / event channels
+                // like a local hockey game) - nothing to take an end time
+                // from, so record a fixed 3 hours instead of offering nothing.
+                // Stoppable any time from this same menu.
+                channel.streamId == cursorChannel?.streamId &&
+                    programAt(cursorPrograms, nowEpoch) == null ->
+                    MenuAction("Record next 3 hours", { onRecordShow(channel, NO_GUIDE_RECORD_MINUTES) })
                 else -> null
             }
         }
@@ -213,9 +234,9 @@ fun FavoritesScreen(
             EpgTimelineGrid(
                 favorites = favorites,
                 epgWindows = epgWindows,
-                defaultStreamId = defaultStreamId,
+                tunedStreamId = tunedStreamId,
                 nowEpoch = nowEpoch,
-                initialFocusStreamId = if (mode == GuideMode.Embedded) tunedChannel?.streamId else defaultStreamId,
+                initialFocusStreamId = if (mode == GuideMode.Embedded) tunedChannel?.streamId else tunedStreamId,
                 mode = mode,
                 cursorStreamId = cursorChannel?.streamId,
                 cursorEpoch = effectiveCursorEpoch,
@@ -231,10 +252,10 @@ fun FavoritesScreen(
                         if (mode == GuideMode.Embedded) onChannelTuned(channel)
                     }
                 },
-                onSetDefault = onSetDefault,
                 onRemove = onRemove,
                 recordActionFor = recordActionFor,
                 onFocusedChannelChanged = { channel -> cursorStreamId = channel.streamId },
+                onProvideDirectionLeftHandler = onProvideDirectionLeftHandler,
                 modifier = Modifier.weight(1f).fillMaxWidth()
             )
         }
@@ -249,7 +270,7 @@ fun FavoritesScreen(
 private fun EpgTimelineGrid(
     favorites: List<LiveChannel>,
     epgWindows: Map<Int, List<EpgProgram>>,
-    defaultStreamId: Int?,
+    tunedStreamId: Int?,
     nowEpoch: Long,
     initialFocusStreamId: Int?,
     mode: GuideMode,
@@ -258,10 +279,13 @@ private fun EpgTimelineGrid(
     cursorSpan: Pair<Long, Long>?,
     onCursorEpochChange: (Long) -> Unit,
     onOk: (LiveChannel) -> Unit,
-    onSetDefault: (LiveChannel) -> Unit,
     onRemove: (LiveChannel) -> Unit,
     recordActionFor: (LiveChannel) -> MenuAction?,
     onFocusedChannelChanged: (LiveChannel) -> Unit,
+    // BrowseOnly only (see WithRail's onDirectionLeft doc) - republished
+    // every recomposition so WithRail always calls the current cursor/
+    // programs state, not a stale closure from first composition.
+    onProvideDirectionLeftHandler: ((() -> Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val appColors = LocalAppColors.current
@@ -307,6 +331,15 @@ private fun EpgTimelineGrid(
             onCursorEpochChange(max(program.startEpochSeconds, windowStartEpoch))
             revealSpan(max(program.startEpochSeconds, windowStartEpoch), program.stopEpochSeconds)
         }
+        // The real "walk cursor to the previous program" logic, republished
+        // to WithRail (via FavoritesScreen) every recomposition so Left
+        // reaches this before WithRail's own rail-opening fallback - see
+        // WithRail's onDirectionLeft doc for why this hook exists at all.
+        val tryMoveCursorLeft: () -> Boolean = {
+            val programs = cursorStreamId?.let { epgWindows[it] }.orEmpty()
+            previousProgram(programs, cursorEpoch, windowStartEpoch)?.let { moveCursorTo(it); true } ?: false
+        }
+        SideEffect { onProvideDirectionLeftHandler?.invoke(tryMoveCursorLeft) }
 
         Box(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -325,16 +358,20 @@ private fun EpgTimelineGrid(
                             // (Up/Down use default row focus traversal and
                             // keep the cursor's time). Nothing here retunes
                             // the preview - only OK does.
-                            // BrowseOnly ("My TV" from the rail): Left with
-                            // no earlier program is left unhandled so it
-                            // bubbles up to WithRail's Left handler and
-                            // summons the side menu, same as every other
-                            // screen.
                             // Embedded (reduced live view, reached via Back
                             // from full-screen live): Left never opens
                             // anything (Back takes over that role there, same
                             // as it does in the player), it just stops at the
-                            // earliest program.
+                            // earliest program - handled right here, since
+                            // Embedded has no WithRail ancestor to bubble to.
+                            // BrowseOnly ("My TV" from the rail): this branch
+                            // is effectively unreachable - WithRail's
+                            // onPreviewKeyEvent, an ancestor of this
+                            // LazyColumn, always intercepts Left first (see
+                            // its onDirectionLeft doc). tryMoveCursorLeft
+                            // above is what actually runs Left's logic there,
+                            // via that hook; this branch only still matters
+                            // for Embedded.
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                             val programs = cursorStreamId?.let { epgWindows[it] }.orEmpty()
                             when (event.key) {
@@ -361,12 +398,10 @@ private fun EpgTimelineGrid(
                             programs = epgWindows[channel.streamId].orEmpty(),
                             windowStartEpoch = windowStartEpoch,
                             nowEpoch = nowEpoch,
-                            isTuned = channel.streamId == defaultStreamId,
                             scrollState = scrollState,
                             channelColumnWidth = channelColumnWidth,
                             cursorEpoch = if (channel.streamId == cursorStreamId) cursorEpoch else null,
                             onPlay = { onOk(channel) },
-                            onSetDefault = { onSetDefault(channel) },
                             onRemoveFavorite = { onRemove(channel) },
                             recordAction = recordActionFor(channel),
                             onFocused = { onFocusedChannelChanged(channel) },
@@ -438,7 +473,7 @@ private fun TopPreviewBlock(
                     )
                 } else {
                     Text(
-                        text = "No default channel set",
+                        text = "Nothing watched yet",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.align(Alignment.Center).padding(8.dp)
@@ -633,14 +668,12 @@ private fun EpgChannelRow(
     programs: List<EpgProgram>,
     windowStartEpoch: Long,
     nowEpoch: Long,
-    isTuned: Boolean,
     scrollState: ScrollState,
     channelColumnWidth: androidx.compose.ui.unit.Dp,
     // Non-null only on the cursor's row; the program/gap containing it gets
     // the green highlight (while this row has D-pad focus).
     cursorEpoch: Long?,
     onPlay: () -> Unit,
-    onSetDefault: () -> Unit,
     onRemoveFavorite: () -> Unit,
     recordAction: MenuAction?,
     onFocused: () -> Unit,
@@ -661,10 +694,7 @@ private fun EpgChannelRow(
 
     // The focused row gets no background of its own (user request
     // 2026-09-20) - the green cursor cell and the white channel name are the
-    // only signs of where you are. The default/tuned channel no longer gets
-    // a permanent green name color, since that read as a confusing second
-    // "selected" state. isTuned still drives the "currently playing" cell
-    // logic below and the RowActionsMenu toggle.
+    // only signs of where you are.
     val nameColor = if (isFocused) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
 
     // No scale/border/glow here, unlike the app's standard §5 card recipe -
@@ -821,7 +851,6 @@ private fun EpgChannelRow(
         onDismiss = { menuExpanded = false },
         actions = listOfNotNull(
             recordAction,
-            MenuAction(if (isTuned) "Remove Default" else "Set as Default", onSetDefault),
             MenuAction("Remove from Favorite...", { confirmRemoveExpanded = true }, isDestructive = true)
         )
     )

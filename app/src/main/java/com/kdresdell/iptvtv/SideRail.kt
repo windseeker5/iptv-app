@@ -235,16 +235,21 @@ private fun RailRow(
             )
             if (showAlert) {
                 Spacer(modifier = Modifier.weight(1f))
+                // Explicit red/white, not MaterialTheme.colorScheme.error/onError -
+                // this app's error role is a muted pink-on-maroon pair (tuned for
+                // the Error Log's body text), which read as barely-there when
+                // reused for a notification badge. A badge needs to actually
+                // look like an alert: solid red circle, solid white mark.
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(18.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error)
+                        .background(Color(0xFFE53935))
                 ) {
                     Text(
                         text = "!",
-                        color = MaterialTheme.colorScheme.onError,
+                        color = Color.White,
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                     )
                 }
@@ -281,6 +286,17 @@ fun WithRail(
     // device - the caller is expected to release any live playback and then
     // actually finish() the Activity.
     onExitApp: () -> Unit,
+    // Lets content claim Left for its own purposes first (the EPG guide's
+    // timeline navigation) - only when this returns false/is absent does
+    // Left fall through to the normal local-focus-move-then-open-rail
+    // behavior below. Without this hook, this Box's onPreviewKeyEvent (an
+    // ancestor of everything in `content`) always intercepted Left before
+    // any descendant's own onKeyEvent ever ran - the guide's "walk the
+    // cursor back through earlier programs, only open the rail at the
+    // leftmost edge" logic was dead code, since moveFocus(Left) below
+    // resolves straight to the hidden rail's first item (still laid out,
+    // just off-canvas) on literally every Left press.
+    onDirectionLeft: (() -> Boolean)? = null,
     content: @Composable () -> Unit
 ) {
     var railFocused by remember { mutableStateOf(false) }
@@ -318,8 +334,10 @@ fun WithRail(
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (event.key) {
                         Key.DirectionLeft -> {
-                            if (!focusManager.moveFocus(FocusDirection.Left)) {
-                                railFirstItemFocusRequester.requestFocus()
+                            if (onDirectionLeft?.invoke() != true) {
+                                if (!focusManager.moveFocus(FocusDirection.Left)) {
+                                    railFirstItemFocusRequester.requestFocus()
+                                }
                             }
                             true
                         }

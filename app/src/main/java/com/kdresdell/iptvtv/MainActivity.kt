@@ -145,6 +145,12 @@ private fun PlayableItem.toPlayerParams(api: XtreamApi, channelDb: LiveChannelDa
 private const val EPG_CHECK_INTERVAL_MILLIS = 60 * 60 * 1000L
 private const val EPG_RETRY_INTERVAL_MILLIS = 10 * 60 * 1000L
 
+// App-update checks: infrequent enough not to bother the update server, but
+// frequent enough that a device left running for days still notices a new
+// release without needing a manual restart.
+private const val UPDATE_CHECK_INTERVAL_MILLIS = 6 * 60 * 60 * 1000L
+private const val UPDATE_RETRY_INTERVAL_MILLIS = 30 * 60 * 1000L
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -170,7 +176,7 @@ class MainActivity : ComponentActivity() {
             val prefs = remember { ProviderPrefs(context) }
             val favoritesStore = remember { FavoritesStore(context) }
             val channelDb = remember { LiveChannelDatabase(context) }
-            val defaultChannelStore = remember { DefaultChannelStore(context) }
+            val lastWatchedStore = remember { LastWatchedStore(context) }
             val searchHistoryStore = remember { SearchHistoryStore(context) }
             val vodFavoritesStore = remember { VodFavoritesStore(context) }
             var credentials by remember { mutableStateOf(prefs.load()) }
@@ -178,20 +184,31 @@ class MainActivity : ComponentActivity() {
             var camera by remember { mutableStateOf(cameraPrefs.load()) }
             // The doorbell is injected here, never persisted (see DoorbellChannel).
             var favorites by remember { mutableStateOf(DoorbellChannel.withDoorbell(favoritesStore.load(), camera)) }
-            var defaultStreamId by remember { mutableStateOf(defaultChannelStore.getDefaultStreamId()) }
+            var lastWatchedStreamId by remember { mutableStateOf(lastWatchedStore.getLastWatched()) }
             var searchHistory by remember { mutableStateOf(searchHistoryStore.load()) }
             var savedMovies by remember { mutableStateOf(vodFavoritesStore.loadMovies()) }
             var savedSeries by remember { mutableStateOf(vodFavoritesStore.loadSeries()) }
             var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
             val coroutineScope = rememberCoroutineScope()
+            // Keeps checking for the life of the app, same pattern as the
+            // guide/catalog refresh loops below - a one-shot check here used
+            // to mean a device left running for days would never notice a
+            // new release without a manual restart.
             LaunchedEffect(Unit) {
-                try {
-                    val update = UpdateChecker().checkForUpdate()
-                    if (update != null && update.versionCode > BuildConfig.VERSION_CODE) {
-                        availableUpdate = update
+                while (true) {
+                    val retryDelay = try {
+                        val update = UpdateChecker().checkForUpdate()
+                        if (update != null && update.versionCode > BuildConfig.VERSION_CODE) {
+                            availableUpdate = update
+                        }
+                        UPDATE_CHECK_INTERVAL_MILLIS
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        AppLog.log("Update check failed: ${e.javaClass.simpleName}: ${e.message}")
+                        UPDATE_RETRY_INTERVAL_MILLIS
                     }
-                } catch (e: Exception) {
-                    AppLog.log("Update check failed: ${e.javaClass.simpleName}: ${e.message}")
+                    delay(retryDelay)
                 }
             }
             val onUpdateClick: () -> Unit = {
@@ -209,17 +226,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
             var searchQuery by remember { mutableStateOf("") }
-            // Computed once, at cold start: if a default channel is set and
-            // still among the favorites, launch straight into it instead of
-            // the Favorites list.
+            // Computed once, at cold start: launch straight into the last
+            // watched channel if it's still among the favorites, otherwise
+            // the first favorite in guide order, otherwise the Favorites
+            // list itself (e.g. no favorites yet).
             var screen by remember {
                 mutableStateOf<Screen>(
                     when {
                         !credentials.isComplete -> Screen.Settings
                         else -> {
-                            val defaultChannel = defaultStreamId?.let { id -> favorites.find { it.streamId == id } }
-                            if (defaultChannel != null) {
-                                Screen.NowPlaying(PlayableItem.Live(defaultChannel), returnTo = Screen.Favorites)
+                            val startChannel = lastWatchedStreamId?.let { id -> favorites.find { it.streamId == id } }
+                                ?: favorites.firstOrNull()
+                            if (startChannel != null) {
+                                Screen.NowPlaying(PlayableItem.Live(startChannel), returnTo = Screen.Favorites)
                             } else {
                                 Screen.Favorites
                             }
@@ -228,17 +247,21 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
+            // Tracks whichever live channel is currently showing, so the next
+            // cold start can resume it (see the startup `when` above).
+            LaunchedEffect(screen) {
+                val item = (screen as? Screen.NowPlaying)?.item
+                if (item is PlayableItem.Live && !DoorbellChannel.isDoorbell(item.channel.streamId)) {
+                    lastWatchedStreamId = item.channel.streamId
+                    lastWatchedStore.setLastWatched(item.channel.streamId)
+                }
+            }
+
             val isFavorite: (Int) -> Boolean = { id -> favorites.any { it.streamId == id } }
             val toggleFavorite: (LiveChannel) -> Unit = toggle@{ channel ->
                 // The doorbell comes and goes with its Settings entry, not the star.
                 if (DoorbellChannel.isDoorbell(channel.streamId)) return@toggle
                 favorites = DoorbellChannel.withDoorbell(favoritesStore.toggle(channel, favorites), camera)
-                // A channel that is no longer a favorite can't stay the
-                // default (it would still auto-launch at app start).
-                if (defaultStreamId == channel.streamId && favorites.none { it.streamId == channel.streamId }) {
-                    defaultStreamId = null
-                    defaultChannelStore.setDefault(null)
-                }
             }
             val onSaveCamera: (CameraConfig) -> Unit = { saved ->
                 cameraPrefs.save(saved)
@@ -246,11 +269,10 @@ class MainActivity : ComponentActivity() {
                 favorites = DoorbellChannel.withDoorbell(favorites, saved)
             }
             val guideRecording = remember { GuideRecordingBridge() }
-            val onSetDefault: (LiveChannel) -> Unit = { channel ->
-                val newDefault = if (defaultStreamId == channel.streamId) null else channel.streamId
-                defaultStreamId = newDefault
-                defaultChannelStore.setDefault(newDefault)
-            }
+            // Bridges FavoritesScreen's internal EPG cursor state up to
+            // WithRail's onDirectionLeft (My TV/BrowseOnly only - see
+            // WithRail's doc for why this indirection is needed at all).
+            val guideLeftHandler = remember { mutableStateOf<() -> Boolean>({ false }) }
             val isMovieSaved: (Int) -> Boolean = { id -> savedMovies.any { it.streamId == id } }
             val isSeriesSaved: (Int) -> Boolean = { id -> savedSeries.any { it.seriesId == id } }
             val toggleMovieSaved: (VodStream) -> Unit = { movie ->
@@ -322,6 +344,33 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Settings' "Refresh list now". Launched on the activity-wide
+            // scope, not the Settings screen's, so leaving Settings mid-way
+            // doesn't cancel the download.
+            var lastListRefreshMillis by remember { mutableStateOf(channelDb.lastCatalogSyncMillis()) }
+            var listRefreshStep by remember { mutableStateOf<ListRefreshProgress?>(null) }
+            var listRefreshError by remember { mutableStateOf<String?>(null) }
+            val onRefreshList: () -> Unit = {
+                if (listRefreshStep == null) {
+                    listRefreshError = null
+                    listRefreshStep = ListRefreshProgress(0, 4, "Connecting to your provider...")
+                    coroutineScope.launch {
+                        try {
+                            catalogRefresher.refreshAll { progress -> listRefreshStep = progress }
+                            whatsNewVersion++
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLog.log("Manual list refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                            listRefreshError = e.message ?: "Unknown error"
+                        } finally {
+                            listRefreshStep = null
+                            lastListRefreshMillis = channelDb.lastCatalogSyncMillis()
+                        }
+                    }
+                }
+            }
+
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -351,7 +400,11 @@ class MainActivity : ComponentActivity() {
                                 availableUpdate = availableUpdate,
                                 onUpdateClick = onUpdateClick,
                                 cameraInitial = camera,
-                                onSaveCamera = onSaveCamera
+                                onSaveCamera = onSaveCamera,
+                                lastListRefreshMillis = lastListRefreshMillis,
+                                listRefreshStep = listRefreshStep,
+                                listRefreshError = listRefreshError,
+                                onRefreshList = onRefreshList
                             )
                         }
                     }
@@ -364,17 +417,23 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Screen.Favorites -> {
-                    WithRail(selected = currentScreen.toRailItem(), onSelectRail = onSelectRail, hasSettingsAlert = availableUpdate != null, onExitApp = onExitApp) {
+                    WithRail(
+                        selected = currentScreen.toRailItem(),
+                        onSelectRail = onSelectRail,
+                        hasSettingsAlert = availableUpdate != null,
+                        onExitApp = onExitApp,
+                        onDirectionLeft = { guideLeftHandler.value() }
+                    ) {
                         FavoritesScreen(
                             favorites = favorites,
                             epgWindows = epgWindows,
-                            defaultStreamId = defaultStreamId,
+                            tunedStreamId = lastWatchedStreamId,
                             streamUrlFor = { id -> if (DoorbellChannel.isDoorbell(id)) DoorbellChannel.rtspUrl(camera) else epgApi.liveStreamUrl(id) },
                             onPlay = { channel ->
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = Screen.Favorites)
                             },
                             onRemove = toggleFavorite,
-                            onSetDefault = onSetDefault,
+                            onProvideDirectionLeftHandler = { handler -> guideLeftHandler.value = handler },
                             onRecordShow = { channel, minutes ->
                                 guideRecording.pendingMinutes = minutes
                                 screen = Screen.NowPlaying(
@@ -517,8 +576,6 @@ class MainActivity : ComponentActivity() {
                             onToggleFavorite = toggleFavorite,
                             onToggleMovieSaved = toggleMovieSaved,
                             onToggleSeriesSaved = toggleSeriesSaved,
-                            defaultStreamId = defaultStreamId,
-                            onSetDefault = onSetDefault,
                             getCachedNowPlaying = { id -> channelDb.getCachedNowPlaying(id) }
                         )
                     }
@@ -697,11 +754,10 @@ class MainActivity : ComponentActivity() {
                                 FavoritesScreen(
                                     favorites = favorites,
                                     epgWindows = epgWindows,
-                                    defaultStreamId = defaultStreamId,
+                                    tunedStreamId = lastWatchedStreamId,
                                     streamUrlFor = { id -> if (DoorbellChannel.isDoorbell(id)) DoorbellChannel.rtspUrl(camera) else epgApi.liveStreamUrl(id) },
                                     onPlay = { },
                                     onRemove = toggleFavorite,
-                                    onSetDefault = onSetDefault,
                                     mode = GuideMode.Embedded,
                                     recording = guideRecording,
                                     onRecordShow = { channel, minutes ->

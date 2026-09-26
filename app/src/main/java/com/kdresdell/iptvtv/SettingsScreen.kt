@@ -58,6 +58,9 @@ import com.kdresdell.iptvtv.theme.appCardScale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // STYLE_GUIDE.md §6.7 - text input, hand-rolled on BasicTextField exactly
 // like SearchScreen.kt's SearchField (not the mobile-material3
@@ -326,7 +329,15 @@ fun SettingsScreen(
     availableUpdate: UpdateInfo? = null,
     onUpdateClick: () -> Unit = {},
     cameraInitial: CameraConfig = CameraConfig(),
-    onSaveCamera: (CameraConfig) -> Unit = {}
+    onSaveCamera: (CameraConfig) -> Unit = {},
+    // Provider list refresh (same feature as the phone app's "Refresh
+    // catalog"). onRefreshList is null on first run - nothing to refresh
+    // before there are credentials. listRefreshStep is the current step
+    // while a refresh runs, null otherwise.
+    lastListRefreshMillis: Long? = null,
+    listRefreshStep: ListRefreshProgress? = null,
+    listRefreshError: String? = null,
+    onRefreshList: (() -> Unit)? = null
 ) {
     var camEnabled by remember { mutableStateOf(cameraInitial.enabled) }
     var camHost by remember { mutableStateOf(cameraInitial.host) }
@@ -362,6 +373,7 @@ fun SettingsScreen(
     val usernameFocus = remember { FocusRequester() }
     val passwordFocus = remember { FocusRequester() }
     val saveFocus = remember { FocusRequester() }
+    val refreshListFocus = remember { FocusRequester() }
     val recordingToggleFocus = remember { FocusRequester() }
     val camToggleFocus = remember { FocusRequester() }
     val camHostFocus = remember { FocusRequester() }
@@ -461,10 +473,52 @@ fun SettingsScreen(
                 onClick = { onSave(ProviderCredentials(serverUrl.trim(), username.trim(), password)) },
                 modifier = Modifier.focusRequester(saveFocus),
                 onDirectionDown = {
-                    recordingToggleFocus.requestFocus()
+                    if (onRefreshList != null) refreshListFocus.requestFocus() else recordingToggleFocus.requestFocus()
                     true
                 }
             )
+        }
+
+        // 1b. Provider list - force a fresh download of the channel, movie
+        // and series lists (normally refreshed once a day in the background,
+        // see CatalogRefresher) and show when that last happened. Explicit
+        // request, copied from the phone app. Sits under Provider Setup,
+        // before Recording.
+        if (onRefreshList != null) {
+            item { SectionDivider() }
+            item {
+                Text(text = "Provider list", style = sectionHeaderStyle(), color = MaterialTheme.colorScheme.onSurface)
+            }
+            item {
+                val refreshFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()) }
+                Text(
+                    text = "Last updated: " + (lastListRefreshMillis?.let { refreshFormat.format(Date(it)) } ?: "unknown"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            item {
+                PrimaryActionButton(
+                    text = if (listRefreshStep != null) "Refreshing..." else "Refresh list now",
+                    onClick = { if (listRefreshStep == null) onRefreshList() },
+                    modifier = Modifier.focusRequester(refreshListFocus),
+                    onDirectionDown = {
+                        recordingToggleFocus.requestFocus()
+                        true
+                    }
+                )
+            }
+            if (listRefreshStep != null) {
+                item { ListRefreshProgressCard(listRefreshStep) }
+            } else if (listRefreshError != null) {
+                item {
+                    Text(
+                        text = "Couldn't update the list: $listRefreshError",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
 
         // 2. Recording - off by default (see RecordingPrefs); most Google TV
@@ -721,6 +775,17 @@ fun SettingsScreen(
             items(AppLog.entries) { entry ->
                 ErrorLogRow(entry)
             }
+        }
+        item { SectionDivider() }
+        item {
+            // Passive status, always last - explicit user request so a
+            // screenshot/photo of this screen always answers "which version
+            // is this" without having to ask.
+            Text(
+                text = "Version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

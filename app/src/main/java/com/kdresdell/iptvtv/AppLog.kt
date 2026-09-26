@@ -13,9 +13,23 @@ object AppLog {
     private const val MAX_ENTRIES = 50
     val entries = mutableStateListOf<String>()
 
+    // The same failure repeating (e.g. a provider outage retried every few
+    // minutes) used to add one identical line per attempt - a single ongoing
+    // problem read as dozens of distinct ones. Consecutive repeats of the
+    // same message now update one line's timestamp and count instead.
+    private var lastMessage: String? = null
+    private var lastCount = 0
+
     fun log(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        entries.add(0, "[$timestamp] $message")
-        while (entries.size > MAX_ENTRIES) entries.removeAt(entries.size - 1)
+        if (message == lastMessage && entries.isNotEmpty()) {
+            lastCount++
+            entries[0] = "[$timestamp] $message (×$lastCount)"
+        } else {
+            lastMessage = message
+            lastCount = 1
+            entries.add(0, "[$timestamp] $message")
+            while (entries.size > MAX_ENTRIES) entries.removeAt(entries.size - 1)
+        }
     }
 }

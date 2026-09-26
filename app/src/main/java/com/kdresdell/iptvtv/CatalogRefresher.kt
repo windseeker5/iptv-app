@@ -39,6 +39,25 @@ class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDa
         }
     }
 
+    // Settings' "Refresh list now": re-downloads everything regardless of
+    // age, reporting each step plus a running item count (for
+    // ListRefreshProgressCard). Unlike the daily job, a provider failure is
+    // thrown so the screen can show it; the IMDb scores stay best-effort.
+    suspend fun refreshAll(onProgress: (ListRefreshProgress) -> Unit) = withContext(Dispatchers.IO) {
+        val total = 4
+        fun report(step: Int, label: String, noun: String) = { count: Int ->
+            onProgress(ListRefreshProgress(step, total, label, count, noun))
+        }
+        report(1, "Downloading live channels...", "channels")(0)
+        api.syncAllLiveChannelsInto(db, report(1, "Downloading live channels...", "channels"))
+        report(2, "Downloading movies...", "movies")(0)
+        api.syncAllVodStreamsInto(db, report(2, "Downloading movies...", "movies"))
+        report(3, "Downloading TV shows...", "shows")(0)
+        api.syncAllSeriesInto(db, report(3, "Downloading TV shows...", "shows"))
+        report(4, "Downloading IMDb scores...", "")(0)
+        step("IMDb scores") { downloadRatings() }
+    }
+
     private suspend fun step(label: String, block: suspend () -> Unit): Boolean = try {
         block()
         true

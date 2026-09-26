@@ -244,39 +244,63 @@ fun HelpScreen() {
                                 title = "Watching a channel",
                                 modifier = Modifier.weight(1f),
                                 lines = listOf(
-                                    "OK" to "Channel info",
+                                    "OK" to "Info, then Play / Pause",
                                     "Up / Down" to "Change channel",
                                     "Hold OK" to "Record on / off",
                                     "Back" to "Show the guide"
                                 )
                             )
+                            // Movies/episodes have no guide and no channel to
+                            // change, but do seek - different enough from live
+                            // to need its own group (PlayerScreen's isLive
+                            // branches: Left/Right seek, Back opens the menu
+                            // directly instead of reducing to a guide).
                             HelpGroup(
-                                title = "In the guide",
+                                title = "Watching a movie or show",
                                 modifier = Modifier.weight(1f),
                                 lines = listOf(
-                                    "Left / Right" to "Move through time",
-                                    "Up / Down" to "Change channel",
-                                    "OK" to "Back to full screen",
+                                    "Left / Right" to "Rewind / Fast-forward",
+                                    "OK" to "Info, then Play / Pause",
                                     "Back" to "Open the menu"
                                 )
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(40.dp)) {
                             HelpGroup(
+                                title = "In the guide",
+                                modifier = Modifier.weight(1f),
+                                lines = listOf(
+                                    "Left / Right" to "Move through time",
+                                    "Up / Down" to "Browse channels",
+                                    "OK" to "Preview, then play full screen",
+                                    "Back" to "Open the menu"
+                                )
+                            )
+                            // Same rail everywhere outside the player (Search,
+                            // Settings, My TV, Categories, ...) - Right always
+                            // returns to whatever screen opened it, not
+                            // specifically "the video" (that wording only made
+                            // sense for the in-player rail).
+                            HelpGroup(
                                 title = "In the menu",
                                 modifier = Modifier.weight(1f),
                                 lines = listOf(
                                     "Up / Down" to "Choose a page",
                                     "OK" to "Open it",
-                                    "Right" to "Back to the video",
+                                    "Right" to "Close the menu",
                                     "Back" to "Exit the app"
                                 )
                             )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(40.dp)) {
+                            // "or default" removed along with the default-
+                            // channel feature - long-press now only offers
+                            // Add/Remove Favorite (see ChannelRow.kt).
                             HelpGroup(
                                 title = "In any list",
                                 modifier = Modifier.weight(1f),
                                 lines = listOf(
-                                    "Hold OK" to "Favorite or default"
+                                    "Hold OK" to "Add to Favorite"
                                 )
                             )
                         }

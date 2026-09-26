@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "iptv-tv-app"
 include(":app")
+include(":android-app")
