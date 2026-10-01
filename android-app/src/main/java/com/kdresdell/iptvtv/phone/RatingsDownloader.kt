@@ -30,6 +30,14 @@ class RatingsDownloader(private val db: CatalogDatabase) {
         }
     }
 
+    // What's Hot / What's New lists, matched to this phone's catalog.
+    suspend fun syncWhats() = withContext(Dispatchers.IO) {
+        val lists = WhatsLists.download()
+        val matches = WhatsLists.match(lists, "movie") { onRow -> db.forEachCatalogRow("movie", onRow) } +
+            WhatsLists.match(lists, "tv") { onRow -> db.forEachCatalogRow("tv", onRow) }
+        if (!db.replaceWhatsMatches(matches)) throw XtreamApiException("None of the What's Hot titles are in your catalog yet")
+    }
+
     private fun parseScores(obj: JSONObject?): Map<Int, ImdbScore> {
         val out = HashMap<Int, ImdbScore>()
         if (obj == null) return out

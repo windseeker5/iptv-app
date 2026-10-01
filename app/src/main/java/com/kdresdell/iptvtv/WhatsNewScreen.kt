@@ -24,34 +24,38 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.kdresdell.iptvtv.theme.LocalAppColors
-import java.util.Calendar
 import java.util.Locale
 
-// What's New - a "what should I watch this weekend" screen for someone whose
-// only source is the provider. Four rows of 10 (English/French x movies/
-// series): recent releases, best IMDb score first. The scores are downloaded
-// in the background once a day (CatalogRefresher); this screen only reads what
-// is already stored, so it opens instantly and never does any lookup.
-data class WhatsNewContent(
-    val englishMovies: List<VodStream>,
-    val englishSeries: List<SeriesShow>,
-    val frenchMovies: List<VodStream>,
-    val frenchSeries: List<SeriesShow>
-) {
+// What's Hot / What's New - "what should I watch this weekend" for someone
+// whose only source is the provider. Rows of titles from the lists the KD
+// server builds every night (see WhatsLists), already matched to this
+// catalog in the background, so the screen only reads the local database:
+//   Hot = what people watch this week, any year (in the server's order).
+//   New = released this year, best IMDb score first.
+// English first, then French (original-language French / Quebec titles).
+data class WhatsNewRow(
+    val title: String,
+    val movies: List<VodStream> = emptyList(),
+    val series: List<SeriesShow> = emptyList()
+)
+
+data class WhatsNewContent(val rows: List<WhatsNewRow>) {
     val isEmpty: Boolean
-        get() = englishMovies.isEmpty() && englishSeries.isEmpty() && frenchMovies.isEmpty() && frenchSeries.isEmpty()
+        get() = rows.all { it.movies.isEmpty() && it.series.isEmpty() }
 
     companion object {
-        // Same window as the server job (this year and the two before).
-        fun load(db: LiveChannelDatabase): WhatsNewContent {
-            val minYear = Calendar.getInstance().get(Calendar.YEAR) - 2
-            return WhatsNewContent(
-                englishMovies = db.topMovies(WhatsNewLanguage.English, minYear),
-                englishSeries = db.topSeries(WhatsNewLanguage.English, minYear),
-                frenchMovies = db.topMovies(WhatsNewLanguage.French, minYear),
-                frenchSeries = db.topSeries(WhatsNewLanguage.French, minYear)
-            )
-        }
+        fun load(db: LiveChannelDatabase): WhatsNewContent = WhatsNewContent(
+            listOf(
+                WhatsNewRow("Hot movies", movies = db.whatsMovies("hot", "en")),
+                WhatsNewRow("Hot series", series = db.whatsSeries("hot", "en")),
+                WhatsNewRow("New movies", movies = db.whatsMovies("new", "en")),
+                WhatsNewRow("New series", series = db.whatsSeries("new", "en")),
+                WhatsNewRow("Films populaires (français)", movies = db.whatsMovies("hot", "fr")),
+                WhatsNewRow("Séries populaires (français)", series = db.whatsSeries("hot", "fr")),
+                WhatsNewRow("Nouveaux films (français)", movies = db.whatsMovies("new", "fr")),
+                WhatsNewRow("Nouvelles séries (français)", series = db.whatsSeries("new", "fr"))
+            ).filter { it.movies.isNotEmpty() || it.series.isNotEmpty() }
+        )
     }
 }
 
@@ -74,7 +78,9 @@ fun WhatsNewScreen(
     // focus lands nowhere when this screen opens.
     LaunchedEffect(content) {
         if (content != null && !content.isEmpty) {
-            firstItemFocus.requestFocus()
+            // On a slow box the first card may not be laid out yet; a missed
+            // focus is harmless, a crash is not.
+            runCatching { firstItemFocus.requestFocus() }
         }
     }
 
@@ -100,20 +106,16 @@ fun WhatsNewScreen(
                 val data = state.data
                 if (data.isEmpty) {
                     Text(
-                        text = "What's New is getting ready - come back in a few minutes",
+                        text = "What's Hot is getting ready - your movie and series lists need to finish downloading first",
                         color = onSurfaceVariant,
                         modifier = Modifier.align(Alignment.Center)
                     )
                     return@Box
                 }
-                // The first card of the first row that has any gets the
-                // initial focus.
-                val focusRow = listOf(
-                    data.englishMovies.isNotEmpty(), data.englishSeries.isNotEmpty(),
-                    data.frenchMovies.isNotEmpty(), data.frenchSeries.isNotEmpty()
-                ).indexOf(true)
+                // Empty rows are already dropped, so the first card of the
+                // first row gets the initial focus.
                 fun focusFor(row: Int, isFirst: Boolean): Modifier =
-                    if (row == focusRow && isFirst) Modifier.focusRequester(firstItemFocus) else Modifier
+                    if (row == 0 && isFirst) Modifier.focusRequester(firstItemFocus) else Modifier
 
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -123,12 +125,15 @@ fun WhatsNewScreen(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     item {
-                        Text(text = "What's New", style = whatsNewTitleStyle(), color = onBackground, modifier = Modifier.padding(start = 12.dp))
+                        Text(text = "What's Hot", style = whatsNewTitleStyle(), color = onBackground, modifier = Modifier.padding(start = 12.dp))
                     }
-                    movieRow("English movies", data.englishMovies, 0, ::focusFor, isMovieSaved, onPlayMovie, onToggleMovieSaved)
-                    seriesRow("English series", data.englishSeries, 1, ::focusFor, isSeriesSaved, onOpenEpisodes, onToggleSeriesSaved)
-                    movieRow("French movies", data.frenchMovies, 2, ::focusFor, isMovieSaved, onPlayMovie, onToggleMovieSaved)
-                    seriesRow("French series", data.frenchSeries, 3, ::focusFor, isSeriesSaved, onOpenEpisodes, onToggleSeriesSaved)
+                    data.rows.forEachIndexed { index, row ->
+                        if (row.movies.isNotEmpty()) {
+                            movieRow(row.title, row.movies, index, ::focusFor, isMovieSaved, onPlayMovie, onToggleMovieSaved)
+                        } else {
+                            seriesRow(row.title, row.series, index, ::focusFor, isSeriesSaved, onOpenEpisodes, onToggleSeriesSaved)
+                        }
+                    }
                 }
             }
         }

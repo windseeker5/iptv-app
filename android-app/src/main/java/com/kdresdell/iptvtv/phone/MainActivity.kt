@@ -152,6 +152,17 @@ private fun App() {
             false
         }
     }
+    val syncWhats: suspend () -> Boolean = {
+        try {
+            ratingsDownloader.syncWhats()
+            syncPrefs.markWhatsSynced()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     LaunchedEffect(credentials, refreshTrigger) {
         if (refreshTrigger == 0 && catalogReady) return@LaunchedEffect
@@ -179,7 +190,8 @@ private fun App() {
             lastRefreshMillis = syncPrefs.catalogSyncedAt()
             // Best-effort: What's New just keeps its old scores if the KD
             // server can't be reached.
-            syncProgress = SyncProgress(6, total, "Downloading IMDb scores...")
+            syncProgress = SyncProgress(6, total, "Downloading What's Hot and IMDb scores...")
+            syncWhats()
             if (downloadRatings()) syncPrefs.markRatingsSynced()
             catalogReady = true
             catalogVersion++
@@ -194,6 +206,8 @@ private fun App() {
     // background once a day (or if a DB upgrade dropped them).
     LaunchedEffect(catalogReady) {
         if (!catalogReady) return@LaunchedEffect
+        val noLists = withContext(Dispatchers.IO) { !db.hasWhatsMatches() }
+        if ((noLists || syncPrefs.isWhatsStale()) && syncWhats()) catalogVersion++
         val missing = withContext(Dispatchers.IO) { !db.hasImdbRatings() }
         if ((missing || syncPrefs.isRatingsStale()) && downloadRatings()) {
             syncPrefs.markRatingsSynced()
@@ -414,7 +428,7 @@ private fun HomeTabs(
                 DrawerItem("Search", Icons.Filled.Search, section == Section.SEARCH) { goTo(Section.SEARCH) }
                 DrawerItem("My TV", Icons.Filled.Home, section == Section.MY_TV) { goTo(Section.MY_TV) }
                 DrawerItem("My Library", Icons.Filled.Star, section == Section.MY_LIBRARY) { goTo(Section.MY_LIBRARY) }
-                DrawerItem("What's New", Icons.Filled.ThumbUp, section == Section.WHATS_NEW) { goTo(Section.WHATS_NEW) }
+                DrawerItem("What's Hot", Icons.Filled.ThumbUp, section == Section.WHATS_NEW) { goTo(Section.WHATS_NEW) }
                 DrawerItem("All", Icons.AutoMirrored.Filled.List, section == Section.ALL) { goTo(Section.ALL) }
                 HorizontalDivider(
                     modifier = Modifier.padding(vertical = 8.dp),

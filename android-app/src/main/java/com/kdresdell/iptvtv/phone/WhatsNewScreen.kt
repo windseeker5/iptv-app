@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,10 +19,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,31 +37,37 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import java.util.Calendar
 import java.util.Locale
 
-// Same idea as the TV app's What's New: "what should I watch this weekend".
-// Four rows of 10 (English/French x movies/series) - recent releases, best
-// IMDb score first. Scores come from the KD server's nightly ratings.json
-// (downloaded in MainActivity); this screen only reads what's stored.
-data class WhatsNewContent(
-    val englishMovies: List<VodStream>,
-    val englishSeries: List<SeriesShow>,
-    val frenchMovies: List<VodStream>,
-    val frenchSeries: List<SeriesShow>
-) {
+// Same idea as the TV app's What's Hot: "what should I watch this weekend".
+// Rows of titles from the lists the KD server builds every night (see
+// WhatsLists), already matched to this catalog, so the screen only reads
+// the local database:
+//   Hot = what people watch this week, any year (in the server's order).
+//   New = released this year, best IMDb score first.
+// English or French (original-language French / Quebec titles), picked with
+// the chips at the top.
+data class WhatsNewRow(
+    val title: String,
+    val movies: List<VodStream> = emptyList(),
+    val series: List<SeriesShow> = emptyList()
+)
+
+data class WhatsNewContent(val english: List<WhatsNewRow>, val french: List<WhatsNewRow>) {
     val isEmpty: Boolean
-        get() = englishMovies.isEmpty() && englishSeries.isEmpty() && frenchMovies.isEmpty() && frenchSeries.isEmpty()
+        get() = english.isEmpty() && french.isEmpty()
 
     companion object {
-        // Same window as the server job (this year and the two before).
         fun load(db: CatalogDatabase): WhatsNewContent {
-            val minYear = Calendar.getInstance().get(Calendar.YEAR) - 2
+            fun rows(lang: String, labels: List<String>) = listOf(
+                WhatsNewRow(labels[0], movies = db.whatsMovies("hot", lang)),
+                WhatsNewRow(labels[1], series = db.whatsSeries("hot", lang)),
+                WhatsNewRow(labels[2], movies = db.whatsMovies("new", lang)),
+                WhatsNewRow(labels[3], series = db.whatsSeries("new", lang))
+            ).filter { it.movies.isNotEmpty() || it.series.isNotEmpty() }
             return WhatsNewContent(
-                englishMovies = db.topMovies(WhatsNewLanguage.English, minYear),
-                englishSeries = db.topSeries(WhatsNewLanguage.English, minYear),
-                frenchMovies = db.topMovies(WhatsNewLanguage.French, minYear),
-                frenchSeries = db.topSeries(WhatsNewLanguage.French, minYear)
+                english = rows("en", listOf("Hot movies", "Hot series", "New movies", "New series")),
+                french = rows("fr", listOf("Films populaires", "Séries populaires", "Nouveaux films", "Nouvelles séries"))
             )
         }
     }
@@ -80,20 +92,37 @@ fun WhatsNewScreen(
         is LoadState.Success -> {
             val data = state.data
             if (data.isEmpty) {
-                CenteredNote("What's New is getting ready - come back in a few minutes.")
+                CenteredNote("What's Hot is getting ready - come back in a minute.")
                 return
             }
             val savedMovies = movieFavorites.map { it.streamId }.toSet()
             val savedSeries = seriesFavorites.map { it.seriesId }.toSet()
+            var french by rememberSaveable { mutableStateOf(false) }
+            val rows = if (french) data.french else data.english
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                movieRow("English movies", data.englishMovies, savedMovies, onToggleMovieFavorite) { onPlay(api.vodNowPlaying(it)) }
-                seriesRow("English series", data.englishSeries, savedSeries, onToggleSeriesFavorite, onOpenSeries)
-                movieRow("French movies", data.frenchMovies, savedMovies, onToggleMovieFavorite) { onPlay(api.vodNowPlaying(it)) }
-                seriesRow("French series", data.frenchSeries, savedSeries, onToggleSeriesFavorite, onOpenSeries)
+                item {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    ) {
+                        FilterChip(selected = !french, onClick = { french = false }, label = { Text("English") })
+                        FilterChip(selected = french, onClick = { french = true }, label = { Text("Français") })
+                    }
+                }
+                if (rows.isEmpty()) {
+                    item { CenteredNote(if (french) "Aucun titre français de ces listes dans ton catalogue pour l'instant." else "None of this week's English titles are in your catalog yet.") }
+                }
+                rows.forEach { row ->
+                    if (row.movies.isNotEmpty()) {
+                        movieRow(row.title, row.movies, savedMovies, onToggleMovieFavorite) { onPlay(api.vodNowPlaying(it)) }
+                    } else {
+                        seriesRow(row.title, row.series, savedSeries, onToggleSeriesFavorite, onOpenSeries)
+                    }
+                }
             }
         }
     }

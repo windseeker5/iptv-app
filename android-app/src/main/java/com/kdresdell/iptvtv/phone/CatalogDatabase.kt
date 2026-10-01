@@ -88,6 +88,12 @@ class CatalogDatabase(context: Context) : SQLiteOpenHelper(context, "catalog.db"
         db.execSQL("CREATE INDEX IF NOT EXISTS live_channels_category ON live_channels (category_id)")
         db.execSQL("CREATE INDEX IF NOT EXISTS vod_streams_category ON vod_streams (category_id)")
         db.execSQL("CREATE INDEX IF NOT EXISTS series_category ON series (category_id)")
+        // What's Hot / What's New matches (see WhatsLists). Also IF NOT
+        // EXISTS here so adding it doesn't bump the version (an upgrade
+        // drops everything and re-downloads the whole catalog).
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS whats_matches (list TEXT NOT NULL, kind TEXT NOT NULL, lang TEXT NOT NULL, rank INTEGER NOT NULL, item_id INTEGER NOT NULL, rating REAL NOT NULL, votes INTEGER NOT NULL, PRIMARY KEY (list, kind, lang, rank))"
+        )
     }
 
     // Everything here is a cache of the provider's data - dropping it just
@@ -399,6 +405,94 @@ class CatalogDatabase(context: Context) : SQLiteOpenHelper(context, "catalog.db"
     }
 
     fun hasImdbRatings(): Boolean = countRows("imdb_ratings") > 0
+
+    // ---- What's Hot / What's New (same as the TV app) ----------------
+    // Every movie ("movie") or series ("tv") row: id, name, tmdb (0 = none).
+    fun forEachCatalogRow(kind: String, onRow: (id: Int, name: String, tmdb: Int) -> Unit) {
+        val sql = if (kind == "movie") "SELECT stream_id, name, tmdb FROM vod_streams" else "SELECT series_id, name, tmdb FROM series"
+        readableDatabase.rawQuery(sql, null).use { cursor ->
+            while (cursor.moveToNext()) onRow(cursor.getInt(0), cursor.getString(1) ?: "", cursor.getInt(2))
+        }
+    }
+
+    // An empty match (catalog not downloaded yet) keeps what we have.
+    fun replaceWhatsMatches(matches: List<WhatsLists.Match>): Boolean {
+        if (matches.isEmpty()) return false
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("whats_matches", null, null)
+            val statement = db.compileStatement("INSERT OR REPLACE INTO whats_matches (list, kind, lang, rank, item_id, rating, votes) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            for (m in matches) {
+                statement.clearBindings()
+                statement.bindString(1, m.list)
+                statement.bindString(2, m.kind)
+                statement.bindString(3, m.lang)
+                statement.bindLong(4, m.rank.toLong())
+                statement.bindLong(5, m.itemId.toLong())
+                statement.bindDouble(6, m.rating)
+                statement.bindLong(7, m.votes.toLong())
+                statement.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return true
+    }
+
+    fun hasWhatsMatches(): Boolean = countRows("whats_matches") > 0
+
+    fun whatsMovies(list: String, lang: String, limit: Int = 20): List<VodStream> {
+        val results = mutableListOf<VodStream>()
+        readableDatabase.rawQuery(
+            "SELECT v.stream_id, v.name, v.category_id, v.stream_icon, v.container_extension, v.release_year, v.tmdb, m.rating " +
+                "FROM whats_matches m JOIN vod_streams v ON v.stream_id = m.item_id " +
+                "WHERE m.list = ? AND m.kind = 'movie' AND m.lang = ? ORDER BY m.rank LIMIT ?",
+            arrayOf(list, lang, limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    VodStream(
+                        streamId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        streamIcon = cursor.getString(3) ?: "",
+                        containerExtension = cursor.getString(4) ?: "mp4",
+                        releaseYear = cursor.getInt(5),
+                        tmdb = cursor.getInt(6),
+                        imdbRating = cursor.getDouble(7)
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    fun whatsSeries(list: String, lang: String, limit: Int = 20): List<SeriesShow> {
+        val results = mutableListOf<SeriesShow>()
+        readableDatabase.rawQuery(
+            "SELECT v.series_id, v.name, v.category_id, v.cover, v.release_year, v.tmdb, m.rating " +
+                "FROM whats_matches m JOIN series v ON v.series_id = m.item_id " +
+                "WHERE m.list = ? AND m.kind = 'tv' AND m.lang = ? ORDER BY m.rank LIMIT ?",
+            arrayOf(list, lang, limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    SeriesShow(
+                        seriesId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        cover = cursor.getString(3) ?: "",
+                        releaseYear = cursor.getInt(4),
+                        tmdb = cursor.getInt(5),
+                        imdbRating = cursor.getDouble(6)
+                    )
+                )
+            }
+        }
+        return results
+    }
 
     // Recent releases (minYear and later) in the given language, best IMDb
     // score first, at least MIN_IMDB_VOTES votes. Titles the provider lists

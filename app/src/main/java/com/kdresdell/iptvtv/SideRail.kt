@@ -61,7 +61,7 @@ enum class RailItem(val icon: ImageVector, val label: String) {
     Search(RailIcons.Search, "Search"),
     MyChannel(RailIcons.MyTv, "My TV"),
     MyVod(RailIcons.MyLibrairie, "My Librairie"),
-    WhatsNew(RailIcons.WhatsNew, "What's New"),
+    WhatsNew(RailIcons.WhatsNew, "What's Hot"),
     Categories(RailIcons.All, "All"),
     Settings(RailIcons.Settings, "Settings"),
     Help(RailIcons.Help, "Help")

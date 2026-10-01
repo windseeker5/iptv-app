@@ -23,6 +23,14 @@ class SyncPrefs(context: Context) {
         prefs.edit().putLong(KEY_RATINGS, atMillis).apply()
     }
 
+    // What's Hot / What's New lists - also rebuilt nightly on the server.
+    fun isWhatsStale(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        nowMillis - prefs.getLong(KEY_WHATS, 0L) > RATINGS_MAX_AGE_MILLIS
+
+    fun markWhatsSynced(atMillis: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong(KEY_WHATS, atMillis).apply()
+    }
+
     // The guide cache only covers the channels that were saved when it was
     // fetched, so it's stale if it's old OR a channel was added since.
     fun isEpgStale(wantedEpgIds: Set<String>, nowMillis: Long = System.currentTimeMillis()): Boolean {
@@ -40,6 +48,7 @@ class SyncPrefs(context: Context) {
         private const val KEY_EPG = "epg_synced_at"
         private const val KEY_EPG_IDS = "epg_synced_ids"
         private const val KEY_RATINGS = "ratings_synced_at"
+        private const val KEY_WHATS = "whats_synced_at"
         private const val RATINGS_MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
 
         // Same max age as the TV app's EpgSync. xmltv.php covers ~2 days.

@@ -21,8 +21,8 @@ android {
         applicationId = "com.kdresdell.iptvtv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.14"
+        versionCode = 21
+        versionName = "0.15"
     }
 
     signingConfigs {

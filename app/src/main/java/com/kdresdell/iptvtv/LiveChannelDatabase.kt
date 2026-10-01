@@ -47,7 +47,7 @@ data class ImdbScore(val rating: Double, val votes: Int, val language: String)
 // keystroke caused real ANRs on real hardware. SQLite's LIKE table scan
 // stays fast at that scale; a giant List.filter() in the JVM does not.
 class LiveChannelDatabase(context: Context) :
-    SQLiteOpenHelper(context, "live_channels.db", null, 14) {
+    SQLiteOpenHelper(context, "live_channels.db", null, 15) {
 
     // When the movie/series lists were last downloaded - What's New uses it
     // to refresh them daily (they otherwise only ever synced when empty).
@@ -76,6 +76,7 @@ class LiveChannelDatabase(context: Context) :
         createVodDetailsTable(db)
         createSeriesDetailsTables(db)
         createImdbRatingsTable(db)
+        createWhatsMatchesTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -149,6 +150,11 @@ class LiveChannelDatabase(context: Context) :
             db.execSQL("DROP TABLE IF EXISTS imdb_ratings")
             createImdbRatingsTable(db)
             syncPrefs.edit().putLong("ratings_synced_at", 0L).apply()
+        }
+        if (oldVersion < 15) {
+            // What's Hot / What's New lists from the KD server, matched to
+            // this catalog (see WhatsLists). Filled on the next launch.
+            createWhatsMatchesTable(db)
         }
     }
 
@@ -778,6 +784,122 @@ class LiveChannelDatabase(context: Context) :
         }
         syncPrefs.edit().putLong("ratings_synced_at", System.currentTimeMillis()).apply()
         return true
+    }
+
+    // ---- What's Hot / What's New ------------------------------------
+    // Catalog rows that are on one of the server's lists (WhatsLists), in
+    // list order. Rebuilt whole after each download.
+    private fun createWhatsMatchesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS whats_matches (
+                list TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                lang TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                rating REAL NOT NULL,
+                votes INTEGER NOT NULL,
+                PRIMARY KEY (list, kind, lang, rank)
+            )
+            """.trimIndent()
+        )
+    }
+
+    // Every movie ("movie") or series ("tv") row: id, name, tmdb (0 = none).
+    fun forEachCatalogRow(kind: String, onRow: (id: Int, name: String, tmdb: Int) -> Unit) {
+        val sql = if (kind == "movie") "SELECT stream_id, name, tmdb FROM vod_streams" else "SELECT series_id, name, tmdb FROM series"
+        readableDatabase.rawQuery(sql, null).use { cursor ->
+            while (cursor.moveToNext()) onRow(cursor.getInt(0), cursor.getString(1) ?: "", cursor.getInt(2))
+        }
+    }
+
+    // An empty match (catalog not downloaded yet) keeps what we have.
+    fun replaceWhatsMatches(matches: List<WhatsLists.Match>): Boolean {
+        if (matches.isEmpty()) return false
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM whats_matches")
+            val statement = db.compileStatement("INSERT OR REPLACE INTO whats_matches (list, kind, lang, rank, item_id, rating, votes) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            for (m in matches) {
+                statement.clearBindings()
+                statement.bindString(1, m.list)
+                statement.bindString(2, m.kind)
+                statement.bindString(3, m.lang)
+                statement.bindLong(4, m.rank.toLong())
+                statement.bindLong(5, m.itemId.toLong())
+                statement.bindDouble(6, m.rating)
+                statement.bindLong(7, m.votes.toLong())
+                statement.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        syncPrefs.edit().putLong("whats_synced_at", System.currentTimeMillis()).apply()
+        return true
+    }
+
+    fun isWhatsStale(maxAgeMillis: Long): Boolean =
+        System.currentTimeMillis() - syncPrefs.getLong("whats_synced_at", 0L) > maxAgeMillis
+
+    fun hasWhatsMatches(): Boolean {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM whats_matches", null).use { cursor ->
+            cursor.moveToFirst()
+            return cursor.getInt(0) > 0
+        }
+    }
+
+    fun whatsMovies(list: String, lang: String, limit: Int = 20): List<VodStream> {
+        val results = mutableListOf<VodStream>()
+        readableDatabase.rawQuery(
+            "SELECT v.stream_id, v.name, v.category_id, v.stream_icon, v.container_extension, v.release_year, v.tmdb, m.rating " +
+                "FROM whats_matches m JOIN vod_streams v ON v.stream_id = m.item_id " +
+                "WHERE m.list = ? AND m.kind = 'movie' AND m.lang = ? ORDER BY m.rank LIMIT ?",
+            arrayOf(list, lang, limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    VodStream(
+                        streamId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        streamIcon = cursor.getString(3),
+                        containerExtension = cursor.getString(4),
+                        releaseYear = cursor.getInt(5),
+                        tmdb = cursor.getInt(6),
+                        imdbRating = cursor.getDouble(7)
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    fun whatsSeries(list: String, lang: String, limit: Int = 20): List<SeriesShow> {
+        val results = mutableListOf<SeriesShow>()
+        readableDatabase.rawQuery(
+            "SELECT v.series_id, v.name, v.category_id, v.cover, v.release_year, v.tmdb, m.rating " +
+                "FROM whats_matches m JOIN series v ON v.series_id = m.item_id " +
+                "WHERE m.list = ? AND m.kind = 'tv' AND m.lang = ? ORDER BY m.rank LIMIT ?",
+            arrayOf(list, lang, limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(
+                    SeriesShow(
+                        seriesId = cursor.getInt(0),
+                        name = cursor.getString(1),
+                        categoryId = cursor.getString(2),
+                        cover = cursor.getString(3),
+                        releaseYear = cursor.getInt(4),
+                        tmdb = cursor.getInt(5),
+                        imdbRating = cursor.getDouble(6)
+                    )
+                )
+            }
+        }
+        return results
     }
 
     // Settings' "Last updated" line: the most recent time any of the three
