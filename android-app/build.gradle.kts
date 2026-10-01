@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Same release keystore as the TV app (see its build.gradle.kts), so both
+// APKs come from the one stable signing key.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -12,8 +23,33 @@ android {
         applicationId = "com.kdresdell.iptvtv.phone"
         minSdk = 23
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.11"
+        versionCode = 13
+        versionName = "0.13"
+    }
+
+    signingConfigs {
+        create("release") {
+            val storeFilePath = localProperties.getProperty("RELEASE_STORE_FILE")
+            if (storeFilePath != null) {
+                storeFile = rootProject.file(storeFilePath)
+                storePassword = localProperties.getProperty("RELEASE_STORE_PASSWORD")
+                keyAlias = localProperties.getProperty("RELEASE_KEY_ALIAS")
+                keyPassword = localProperties.getProperty("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
+    // Same JDK-vs-bundled-lint crash as the TV app; sideloaded, no Play
+    // Store lint gate to keep.
+    lint {
+        checkReleaseBuilds = false
     }
 
     compileOptions {

@@ -21,10 +21,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
@@ -71,14 +73,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // v0.2: credentials -> local catalog sync (so search works offline/instantly
-// like the TV app) -> My TV / My Library tabs, Search via the logo, About
-// in the side menu, with a
+// like the TV app) -> My TV / My Library tabs, Search, What's New, All and
+// Settings in the side menu (opened from the logo), with a
 // full-screen player and episode picker layered on top. The catalog only
 // auto-syncs once (first launch); live sports/PPV events get added to the
 // provider's list throughout the day, so a manual "Refresh" button forces a
 // re-sync on demand rather than waiting for a stale local snapshot.
-// Still no recording, no provider switching - see the plan for what stays
-// deferred.
+// Still no recording - see the plan for what stays deferred.
 sealed class PhoneScreen {
     data object Home : PhoneScreen()
     data class Player(val item: NowPlaying) : PhoneScreen()
@@ -140,33 +141,46 @@ private fun App() {
     var refreshTrigger by remember { mutableIntStateOf(0) }
     var lastRefreshMillis by remember { mutableStateOf(syncPrefs.catalogSyncedAt()) }
     var stats by remember { mutableStateOf(CatalogStats()) }
+    val ratingsDownloader = remember { RatingsDownloader(db) }
+    val downloadRatings: suspend () -> Boolean = {
+        try {
+            ratingsDownloader.download()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     LaunchedEffect(credentials, refreshTrigger) {
         if (refreshTrigger == 0 && catalogReady) return@LaunchedEffect
         syncError = null
-        val total = 5
+        val total = 6
         try {
+            // Each list streams straight into the DB as it downloads.
             syncProgress = SyncProgress(1, total, "Downloading live channels...")
-            val live = api.getLiveStreams()
+            api.streamLiveStreams { db.replaceLiveChannels(it) }
             syncProgress = SyncProgress(2, total, "Downloading movies...")
-            val vod = api.getVodStreams()
+            api.streamVodStreams { db.replaceVodStreams(it) }
             syncProgress = SyncProgress(3, total, "Downloading TV shows...")
-            val series = api.getSeriesList()
+            api.streamSeriesList { db.replaceSeries(it) }
             syncProgress = SyncProgress(4, total, "Downloading categories...")
             val liveCategories = api.getLiveCategories()
             val vodCategories = api.getVodCategories()
             val seriesCategories = api.getSeriesCategories()
             syncProgress = SyncProgress(5, total, "Saving to your phone...")
             withContext(Dispatchers.IO) {
-                db.replaceLiveChannels(live)
-                db.replaceVodStreams(vod)
-                db.replaceSeries(series)
                 db.replaceCategories(CatalogKind.LIVE, liveCategories)
                 db.replaceCategories(CatalogKind.VOD, vodCategories)
                 db.replaceCategories(CatalogKind.SERIES, seriesCategories)
             }
             syncPrefs.markCatalogSynced()
             lastRefreshMillis = syncPrefs.catalogSyncedAt()
+            // Best-effort: What's New just keeps its old scores if the KD
+            // server can't be reached.
+            syncProgress = SyncProgress(6, total, "Downloading IMDb scores...")
+            if (downloadRatings()) syncPrefs.markRatingsSynced()
             catalogReady = true
             catalogVersion++
         } catch (e: XtreamApiException) {
@@ -174,6 +188,25 @@ private fun App() {
         } finally {
             syncProgress = null
         }
+    }
+
+    // The server rebuilds the IMDb scores nightly - fetch them in the
+    // background once a day (or if a DB upgrade dropped them).
+    LaunchedEffect(catalogReady) {
+        if (!catalogReady) return@LaunchedEffect
+        val missing = withContext(Dispatchers.IO) { !db.hasImdbRatings() }
+        if ((missing || syncPrefs.isRatingsStale()) && downloadRatings()) {
+            syncPrefs.markRatingsSynced()
+            catalogVersion++
+        }
+    }
+
+    // Changing the login in Settings re-downloads the whole list from the
+    // new provider (the refresh overlay shows over the app meanwhile).
+    val saveCredentials: (ProviderCredentials) -> Unit = { entered ->
+        providerPrefs.save(entered)
+        credentials = entered
+        refreshTrigger++
     }
 
     // Counts + account dates for the Search KPI tiles, re-read after every
@@ -187,7 +220,7 @@ private fun App() {
         stats = stats.copy(account = api.getAccountInfo())
     }
 
-    // Self-update: checked once per launch, and again from the About tab.
+    // Self-update: checked once per launch, and again from Settings.
     val scope = rememberCoroutineScope()
     val updateChecker = remember { UpdateChecker() }
     var updateState by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
@@ -271,6 +304,10 @@ private fun App() {
             }
 
             BackHandler(enabled = screen != PhoneScreen.Home) { screen = PhoneScreen.Home }
+            // Keeps HomeTabs' saveable state (current section, the All
+            // screen's category, scroll positions) while the player or
+            // episode picker is on screen, so Back returns to where you were.
+            val homeState = rememberSaveableStateHolder()
 
             when (val current = screen) {
                 is PhoneScreen.Player -> PlayerScreen(item = current.item, db = db, api = api, onBack = { screen = PhoneScreen.Home })
@@ -280,9 +317,12 @@ private fun App() {
                     onPlay = { screen = PhoneScreen.Player(it) },
                     onBack = { screen = PhoneScreen.Home }
                 )
-                is PhoneScreen.Home -> HomeTabs(
+                is PhoneScreen.Home -> homeState.SaveableStateProvider("home") { HomeTabs(
                     db = db,
                     api = api,
+                    credentials = credentials,
+                    onSaveCredentials = saveCredentials,
+                    catalogVersion = catalogVersion,
                     stats = stats,
                     lastRefreshMillis = lastRefreshMillis,
                     guideStatus = guideStatus,
@@ -299,22 +339,24 @@ private fun App() {
                     onPlay = { screen = PhoneScreen.Player(it) },
                     onOpenSeries = { screen = PhoneScreen.Episodes(it) },
                     onRefresh = { refreshTrigger++ }
-                )
+                ) }
             }
             syncOverlay(true)
         }
     }
 }
 
-// Top-level sections. Only My TV / My Library are tabs; Search is reached
-// from the search icon, About (and future extras) from the side menu,
-// which the logo opens.
-private enum class Section { SEARCH, MY_TV, MY_LIBRARY, ABOUT }
+// Top-level sections. Only My TV / My Library are tabs; Search is also on
+// the search icon; everything is in the side menu, which the logo opens.
+private enum class Section { SEARCH, MY_TV, MY_LIBRARY, WHATS_NEW, ALL, SETTINGS }
 
 @Composable
 private fun HomeTabs(
     db: CatalogDatabase,
     api: XtreamApi,
+    credentials: ProviderCredentials,
+    onSaveCredentials: (ProviderCredentials) -> Unit,
+    catalogVersion: Int,
     stats: CatalogStats,
     lastRefreshMillis: Long?,
     guideStatus: GuideStatus,
@@ -338,7 +380,7 @@ private fun HomeTabs(
     val refreshFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()) }
     val lastRefreshLabel = lastRefreshMillis?.let { refreshFormat.format(Date(it)) } ?: "unknown"
 
-    // Back closes the menu first, then returns Search/About to My TV,
+    // Back closes the menu first, then returns other sections to My TV,
     // before leaving the app.
     BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
     BackHandler(enabled = !drawerState.isOpen && section != Section.MY_TV) { section = Section.MY_TV }
@@ -372,63 +414,40 @@ private fun HomeTabs(
                 DrawerItem("Search", Icons.Filled.Search, section == Section.SEARCH) { goTo(Section.SEARCH) }
                 DrawerItem("My TV", Icons.Filled.Home, section == Section.MY_TV) { goTo(Section.MY_TV) }
                 DrawerItem("My Library", Icons.Filled.Star, section == Section.MY_LIBRARY) { goTo(Section.MY_LIBRARY) }
+                DrawerItem("What's New", Icons.Filled.ThumbUp, section == Section.WHATS_NEW) { goTo(Section.WHATS_NEW) }
+                DrawerItem("All", Icons.AutoMirrored.Filled.List, section == Section.ALL) { goTo(Section.ALL) }
                 HorizontalDivider(
                     modifier = Modifier.padding(vertical = 8.dp),
                     color = MaterialTheme.colorScheme.outlineVariant
                 )
-                NavigationDrawerItem(
-                    label = {
-                        Column {
-                            Text("Refresh catalog")
-                            Text(
-                                "Last refresh: $lastRefreshLabel",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    },
-                    icon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onRefresh()
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                NavigationDrawerItem(
-                    label = { Text("About & updates") },
-                    icon = { Icon(Icons.Filled.Info, contentDescription = null) },
-                    badge = {
-                        if (updateState is UpdateState.Available) {
-                            Text("New", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        }
-                    },
-                    selected = section == Section.ABOUT,
-                    onClick = { goTo(Section.ABOUT) },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
+                DrawerItem(
+                    "Settings",
+                    Icons.Filled.Settings,
+                    section == Section.SETTINGS,
+                    badge = if (updateState is UpdateState.Available) "Update" else null
+                ) { goTo(Section.SETTINGS) }
             }
         }
     ) {
         Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            Row(
+            // The logo is the menu button (no hamburger icon), on the left,
+            // vertically centred with Search on the right.
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 4.dp, vertical = 4.dp)
             ) {
-                // The logo is the menu button (no hamburger icon).
                 Box(
                     modifier = Modifier
+                        .align(Alignment.CenterStart)
                         .padding(start = 8.dp)
                         .clip(CircleShape)
                         .clickable(onClickLabel = "Open menu") { scope.launch { drawerState.open() } }
                         .padding(4.dp)
                 ) {
-                    AppLogo(size = 56.dp)
+                    AppLogo(size = 62.dp)
                 }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { section = Section.SEARCH }) {
+                IconButton(onClick = { section = Section.SEARCH }, modifier = Modifier.align(Alignment.CenterEnd)) {
                     Icon(
                         Icons.Filled.Search,
                         contentDescription = "Search",
@@ -436,9 +455,9 @@ private fun HomeTabs(
                     )
                 }
             }
-            // Launch-time check found a newer build - point to About rather
-            // than installing unasked.
-            if (updateState is UpdateState.Available && section != Section.ABOUT) {
+            // Launch-time check found a newer build - point to Settings
+            // rather than installing unasked.
+            if (updateState is UpdateState.Available && section != Section.SETTINGS) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -451,13 +470,13 @@ private fun HomeTabs(
                         color = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = { section = Section.ABOUT }) {
+                    TextButton(onClick = { section = Section.SETTINGS }) {
                         Text("Update", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
                     }
                 }
             }
             // The indicator only shows while one of the two tabs is the
-            // current section - on Search/About neither tab is "selected".
+            // current section - elsewhere neither tab is "selected".
             val tabIndex = when (section) {
                 Section.MY_TV -> 0
                 Section.MY_LIBRARY -> 1
@@ -514,7 +533,41 @@ private fun HomeTabs(
                     onRemoveMovie = onToggleMovieFavorite,
                     onRemoveSeries = onToggleSeriesFavorite
                 )
-                Section.ABOUT -> AboutScreen(
+                Section.WHATS_NEW -> {
+                    var whatsNew by remember { mutableStateOf<LoadState<WhatsNewContent>>(LoadState.Loading) }
+                    LaunchedEffect(catalogVersion) {
+                        whatsNew = LoadState.Success(withContext(Dispatchers.IO) { WhatsNewContent.load(db) })
+                    }
+                    WhatsNewScreen(
+                        state = whatsNew,
+                        api = api,
+                        movieFavorites = movieFavorites,
+                        seriesFavorites = seriesFavorites,
+                        onToggleMovieFavorite = onToggleMovieFavorite,
+                        onToggleSeriesFavorite = onToggleSeriesFavorite,
+                        onPlay = onPlay,
+                        onOpenSeries = onOpenSeries
+                    )
+                }
+                Section.ALL -> AllScreen(
+                    db = db,
+                    api = api,
+                    catalogVersion = catalogVersion,
+                    liveFavorites = liveFavorites,
+                    movieFavorites = movieFavorites,
+                    seriesFavorites = seriesFavorites,
+                    onToggleLiveFavorite = onToggleLiveFavorite,
+                    onToggleMovieFavorite = onToggleMovieFavorite,
+                    onToggleSeriesFavorite = onToggleSeriesFavorite,
+                    onPlay = onPlay,
+                    onOpenSeries = onOpenSeries
+                )
+                Section.SETTINGS -> SettingsScreen(
+                    credentials = credentials,
+                    onSaveCredentials = onSaveCredentials,
+                    stats = stats,
+                    lastRefreshLabel = lastRefreshLabel,
+                    onRefresh = onRefresh,
                     updateState = updateState,
                     onCheckForUpdate = onCheckForUpdate,
                     onInstallUpdate = onInstallUpdate
@@ -536,10 +589,19 @@ private fun SectionTab(title: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun DrawerItem(label: String, icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
+private fun DrawerItem(label: String, icon: ImageVector, selected: Boolean, badge: String? = null, onClick: () -> Unit) {
     NavigationDrawerItem(
         label = { Text(label) },
         icon = { Icon(icon, contentDescription = null) },
+        badge = badge?.let {
+            {
+                Text(
+                    it,
+                    color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
         selected = selected,
         onClick = onClick,
         colors = NavigationDrawerItemDefaults.colors(

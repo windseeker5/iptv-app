@@ -14,6 +14,15 @@ class SyncPrefs(context: Context) {
         prefs.edit().putLong(KEY_CATALOG, atMillis).apply()
     }
 
+    // IMDb scores for What's New - the server rebuilds them nightly, so a
+    // day-old copy is due for a refresh.
+    fun isRatingsStale(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        nowMillis - prefs.getLong(KEY_RATINGS, 0L) > RATINGS_MAX_AGE_MILLIS
+
+    fun markRatingsSynced(atMillis: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong(KEY_RATINGS, atMillis).apply()
+    }
+
     // The guide cache only covers the channels that were saved when it was
     // fetched, so it's stale if it's old OR a channel was added since.
     fun isEpgStale(wantedEpgIds: Set<String>, nowMillis: Long = System.currentTimeMillis()): Boolean {
@@ -30,6 +39,8 @@ class SyncPrefs(context: Context) {
         private const val KEY_CATALOG = "catalog_synced_at"
         private const val KEY_EPG = "epg_synced_at"
         private const val KEY_EPG_IDS = "epg_synced_ids"
+        private const val KEY_RATINGS = "ratings_synced_at"
+        private const val RATINGS_MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
 
         // Same max age as the TV app's EpgSync. xmltv.php covers ~2 days.
         private const val EPG_MAX_AGE_MILLIS = 12L * 60 * 60 * 1000
