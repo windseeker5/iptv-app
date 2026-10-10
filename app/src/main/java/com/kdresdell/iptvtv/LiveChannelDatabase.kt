@@ -841,6 +841,53 @@ class LiveChannelDatabase(context: Context) :
         return true
     }
 
+    // What Settings shows about the last What's Hot download. syncedAt is the
+    // last SUCCESSFUL one; attemptAt/error describe the most recent try, so a
+    // failed refresh is visible even though the old lists stay in use.
+    class WhatsStatus(
+        val syncedAt: Long?,
+        val attemptAt: Long?,
+        val error: String?,
+        val serverGenerated: String?,
+        // "hot/movie/en" -> (titles in this catalog, titles on the server list)
+        val counts: Map<String, Pair<Int, Int>>
+    )
+
+    fun recordWhatsSuccess(generated: String, total: Map<String, Int>, matched: Map<String, Int>) {
+        val edit = syncPrefs.edit()
+            .putLong("whats_attempt_at", System.currentTimeMillis())
+            .remove("whats_error")
+            .putString("whats_generated", generated)
+        for ((key, n) in total) {
+            edit.putInt("whats_total_$key", n).putInt("whats_matched_$key", matched[key] ?: 0)
+        }
+        edit.apply()
+    }
+
+    fun recordWhatsFailure(message: String) {
+        syncPrefs.edit()
+            .putLong("whats_attempt_at", System.currentTimeMillis())
+            .putString("whats_error", message)
+            .apply()
+    }
+
+    fun whatsStatus(): WhatsStatus {
+        val counts = HashMap<String, Pair<Int, Int>>()
+        for (list in WhatsLists.LISTS) for (kind in WhatsLists.KINDS) for (lang in WhatsLists.LANGS) {
+            val key = "$list/$kind/$lang"
+            if (syncPrefs.contains("whats_total_$key")) {
+                counts[key] = syncPrefs.getInt("whats_matched_$key", 0) to syncPrefs.getInt("whats_total_$key", 0)
+            }
+        }
+        return WhatsStatus(
+            syncedAt = syncPrefs.getLong("whats_synced_at", 0L).takeIf { it > 0 },
+            attemptAt = syncPrefs.getLong("whats_attempt_at", 0L).takeIf { it > 0 },
+            error = syncPrefs.getString("whats_error", null),
+            serverGenerated = syncPrefs.getString("whats_generated", null),
+            counts = counts
+        )
+    }
+
     fun isWhatsStale(maxAgeMillis: Long): Boolean =
         System.currentTimeMillis() - syncPrefs.getLong("whats_synced_at", 0L) > maxAgeMillis
 

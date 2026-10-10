@@ -23,8 +23,8 @@ android {
         applicationId = "com.kdresdell.iptvtv.phone"
         minSdk = 23
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.14"
+        versionCode = 15
+        versionName = "0.15"
     }
 
     signingConfigs {
@@ -76,9 +76,13 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.5.0")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.5.0")
+    implementation("androidx.media3:media3-ui:1.5.0")
+    // Prebuilt FFmpeg audio decoder (Jellyfin's build of Media3's ffmpeg
+    // extension) - see buildPlayer in PlayerScreen.kt. Version must match
+    // the media3 version above; there is no 1.4.x build, hence media3 1.5.0.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
     implementation("io.coil-kt:coil-compose:2.6.0")
     // Google Cast (Chromecast / Google TV) - the Cast button in the player.
     // appcompat because the Cast device picker is an AppCompat dialog.

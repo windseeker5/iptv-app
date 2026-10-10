@@ -45,6 +45,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.input.key.Key
@@ -177,6 +180,8 @@ fun PlayerScreen(
         } else {
             val player = remember(streamUrl) {
                 ExoPlayer.Builder(context).build().apply {
+                    // Last chosen audio/subtitle language (see TrackChoices.kt).
+                    applyTrackPrefs(TrackPrefs(context))
                     setMediaItem(MediaItem.fromUri(streamUrl))
                     addListener(object : Player.Listener {
                         override fun onPlayerError(error: PlaybackException) {
@@ -244,6 +249,14 @@ fun PlayerScreen(
     var nextProgram by remember(contentId) { mutableStateOf<EpgProgram?>(null) }
     val focusRequester = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
+
+    // Audio language / subtitle picker - movies and episodes only (live
+    // shares one player across channels, see LivePlaybackHolder). Opened
+    // with Up, which VOD doesn't otherwise use; OK keeps meaning play/pause.
+    val trackChoices = rememberTrackChoices(exoPlayer)
+    MatchDisplayFrameRate(exoPlayer, enabled = !isLive)
+    val trackPrefs = remember { TrackPrefs(context) }
+    var showTrackMenu by remember(contentId) { mutableStateOf(false) }
 
     // First prototype of live recording (see docs/next-session.md §2):
     // raw copy of the stream's bytes to a file on an attached USB drive,
@@ -697,7 +710,12 @@ fun PlayerScreen(
                         // Channel-cycling only makes sense for live playback.
                         // Recording never silently follows a channel switch -
                         // it always stops first.
-                        if (isLive) { stopRecording(); onChannelChange(-1); true } else false
+                        if (isLive) {
+                            stopRecording(); onChannelChange(-1); true
+                        } else {
+                            showTrackMenu = true
+                            true
+                        }
                     }
                     Key.DirectionDown -> {
                         if (isLive) { stopRecording(); onChannelChange(1); true } else false
@@ -845,7 +863,8 @@ fun PlayerScreen(
                     nowProgram = nowProgram,
                     nextProgram = nextProgram,
                     nowEpochSeconds = nowEpochSeconds,
-                    recordingEnabled = recordingEnabled
+                    recordingEnabled = recordingEnabled,
+                    showTrackHint = !isLive
                 )
 
                 Box(
@@ -905,6 +924,20 @@ fun PlayerScreen(
             }
         )
 
+        TrackPickerMenu(
+            expanded = showTrackMenu && !isLive,
+            choices = trackChoices,
+            onDismiss = { showTrackMenu = false },
+            onSelectTrack = { option ->
+                showTrackMenu = false
+                exoPlayer.selectTrack(option, trackPrefs)
+            },
+            onSubtitlesOff = {
+                showTrackMenu = false
+                exoPlayer.turnSubtitlesOff(trackPrefs)
+            }
+        )
+
         // Left shows only the rail, over the still-playing video/audio.
         // Picking anything closes it and navigates to that item's own
         // full-screen page via onSelectRail - the same real SideRail (§6.2)
@@ -930,6 +963,30 @@ fun PlayerScreen(
 // app talks to (XtreamApi.kt) never returns that metadata for a stream, so
 // rather than fabricate it, this block only renders the time range +
 // duration, which is real data.
+// Dark shade behind the info overlay's bottom block, sized to that block:
+// it's solid from the block's top edge down and fades out over `fade` above
+// it, so a channel with no guide info (just its name) gets a low, light shade
+// instead of the old fixed black half-screen, and a long description gets a
+// taller, darker one. Replaces the fixed 37%-55% screen gradient - its short
+// fade was asked for on 2026-09-17, then read as "black, then bang, the
+// picture" on 2026-10-10, so the fade is now long and eased, and never fully
+// black (the text shadow carries the rest of the contrast).
+private fun Modifier.bottomScrim(strong: Boolean): Modifier = drawWithCache {
+    val fadePx = (if (strong) 220.dp else 120.dp).toPx()
+    val maxAlpha = if (strong) 0.88f else 0.55f
+    val total = fadePx + size.height
+    val edge = fadePx / total
+    // smoothstep from transparent to maxAlpha over the fade, then flat.
+    val stops = (0..8).map { i ->
+        val t = i / 8f
+        edge * t to Color.Black.copy(alpha = maxAlpha * t * t * (3 - 2 * t))
+    } + (1f to Color.Black.copy(alpha = maxAlpha))
+    val brush = Brush.verticalGradient(*stops.toTypedArray(), startY = -fadePx, endY = size.height)
+    onDrawBehind {
+        drawRect(brush, topLeft = Offset(0f, -fadePx), size = Size(size.width, total))
+    }
+}
+
 @Composable
 private fun PlayerInfoOverlay(
     channelName: String,
@@ -942,40 +999,16 @@ private fun PlayerInfoOverlay(
     nowProgram: EpgProgram?,
     nextProgram: EpgProgram?,
     nowEpochSeconds: Long,
-    recordingEnabled: Boolean
+    recordingEnabled: Boolean,
+    showTrackHint: Boolean
 ) {
     val appColors = LocalAppColors.current
     val textShadow = Shadow(color = Color.Black.copy(alpha = 0.8f), blurRadius = 12f)
 
+    // No full-screen shade any more - each bottom block carries its own
+    // (bottomScrim), sized to its text. See bottomScrim for why.
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                // Black at the bottom, fading to transparent going up. Two
-                // hard constraints pinned this shape:
-                // - must reach solid black by ~0.55 (measured on-device
-                //   after the text-size pass below shrank the info block:
-                //   its icon/title top edge sits lower on screen now than
-                //   when this was tuned to 0.48, so the fade needed to move
-                //   down with it or the top of the block lost its dark
-                //   backing - explicit user request 2026-09-17).
-                // - the user explicitly wants the fade compressed into a
-                //   short span ("transparent quicker") rather than starting
-                //   near the very top of the screen - video should stay
-                //   fully clear until ~37% down, then fade over a short
-                //   stretch into the required-solid point.
-                // Same eased curve (smoothstep) as before, just shifted down
-                // to the 0.37-0.55 span instead of 0.30-0.48.
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.37f to Color.Transparent,
-                        0.42f to Color.Black.copy(alpha = 0.16f),
-                        0.46f to Color.Black.copy(alpha = 0.5f),
-                        0.51f to Color.Black.copy(alpha = 0.84f),
-                        0.55f to Color.Black
-                    )
-                )
-            )
+        modifier = Modifier.fillMaxSize()
     ) {
         // Top row - matches the approved mockup exactly (see STYLE_GUIDE.md
         // §6.1, https://claude.ai/artifact/8zMP1RLmCz257xqzuUKmpz): no
@@ -1008,11 +1041,23 @@ private fun PlayerInfoOverlay(
                     style = MaterialTheme.typography.titleLarge.copy(shadow = textShadow)
                 )
             }
-            Text(
-                text = formatNowDateTime(nowEpochSeconds),
-                color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.titleMedium.copy(shadow = textShadow)
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = formatNowDateTime(nowEpochSeconds),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleMedium.copy(shadow = textShadow)
+                )
+                if (showTrackHint) {
+                    // Up on the remote opens TrackPickerMenu - see the
+                    // Key.DirectionUp branch in PlayerScreen's onKeyEvent.
+                    Text(
+                        text = "▲  Audio & subtitles",
+                        color = appColors.vividAccent,
+                        style = MaterialTheme.typography.labelLarge.copy(shadow = textShadow),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
         }
 
         if (!isLive) {
@@ -1030,6 +1075,7 @@ private fun PlayerInfoOverlay(
                 verticalAlignment = Alignment.Top,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bottomScrim(strong = !description.isNullOrBlank())
                     .padding(horizontal = 48.dp)
                     .padding(bottom = 32.dp)
             ) {
@@ -1085,6 +1131,7 @@ private fun PlayerInfoOverlay(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .bottomScrim(strong = !description.isNullOrBlank())
                 .padding(horizontal = 48.dp)
                 .padding(top = 64.dp, bottom = 24.dp)
         ) {

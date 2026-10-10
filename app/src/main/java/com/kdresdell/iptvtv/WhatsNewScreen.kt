@@ -4,6 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -67,7 +70,10 @@ fun WhatsNewScreen(
     onPlayMovie: (VodStream) -> Unit,
     onOpenEpisodes: (SeriesShow) -> Unit,
     onToggleMovieSaved: (VodStream) -> Unit,
-    onToggleSeriesSaved: (SeriesShow) -> Unit
+    onToggleSeriesSaved: (SeriesShow) -> Unit,
+    whatsStatus: LiveChannelDatabase.WhatsStatus? = null,
+    whatsRefreshing: Boolean = false,
+    onRefreshWhats: () -> Unit = {}
 ) {
     val onBackground = MaterialTheme.colorScheme.onBackground
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
@@ -97,7 +103,7 @@ fun WhatsNewScreen(
             )
 
             is LoadState.Error -> Text(
-                text = "Could not load What's New - ${state.message}",
+                text = "Could not load Discover - ${state.message}",
                 color = onSurfaceVariant,
                 modifier = Modifier.align(Alignment.Center)
             )
@@ -105,11 +111,16 @@ fun WhatsNewScreen(
             is LoadState.Success -> {
                 val data = state.data
                 if (data.isEmpty) {
-                    Text(
-                        text = "What's Hot is getting ready - your movie and series lists need to finish downloading first",
-                        color = onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(20.dp)
+                    ) {
+                        DiscoverHeader(whatsStatus, whatsRefreshing, onRefreshWhats)
+                        Text(
+                            text = "What's Hot is getting ready - your movie and series lists need to finish downloading first",
+                            color = onSurfaceVariant
+                        )
+                    }
                     return@Box
                 }
                 // Empty rows are already dropped, so the first card of the
@@ -125,7 +136,7 @@ fun WhatsNewScreen(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     item {
-                        Text(text = "What's Hot", style = whatsNewTitleStyle(), color = onBackground, modifier = Modifier.padding(start = 12.dp))
+                        DiscoverHeader(whatsStatus, whatsRefreshing, onRefreshWhats, Modifier.padding(horizontal = 12.dp))
                     }
                     data.rows.forEachIndexed { index, row ->
                         if (row.movies.isNotEmpty()) {
@@ -136,6 +147,54 @@ fun WhatsNewScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+// Screen title with, on the right, when this device last fetched the lists
+// from OMT (and when OMT built them) and a small Refresh button. A failed
+// fetch shows its error in red instead.
+@Composable
+private fun DiscoverHeader(
+    status: LiveChannelDatabase.WhatsStatus?,
+    refreshing: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val format = remember { java.text.SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()) }
+    fun stamp(millis: Long?) = millis?.let { format.format(java.util.Date(it)) } ?: "never"
+    val serverBuilt = status?.serverGenerated?.takeIf { it.isNotBlank() }?.let { iso ->
+        runCatching { format.format(java.util.Date(java.time.Instant.parse(iso.replace("+00:00", "Z")).toEpochMilli())) }.getOrNull()
+    }
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = "Old Man Tricks", style = whatsNewTitleStyle(), color = MaterialTheme.colorScheme.onBackground)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (status?.error != null) {
+                Text(
+                    text = "Update failed: ${status.error}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 420.dp)
+                )
+            } else {
+                Text(
+                    text = "Updated ${stamp(status?.syncedAt)}" + (serverBuilt?.let { " · list $it" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+            PrimaryActionButton(
+                text = if (refreshing) "Refreshing..." else "Refresh",
+                onClick = { if (!refreshing) onRefresh() },
+                compact = true
+            )
         }
     }
 }

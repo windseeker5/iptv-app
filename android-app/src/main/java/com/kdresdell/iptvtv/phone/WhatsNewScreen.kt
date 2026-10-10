@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,8 +24,10 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -37,6 +40,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 // Same idea as the TV app's What's Hot: "what should I watch this weekend".
@@ -84,15 +89,21 @@ fun WhatsNewScreen(
     onToggleMovieFavorite: (VodStream) -> Unit,
     onToggleSeriesFavorite: (SeriesShow) -> Unit,
     onPlay: (NowPlaying) -> Unit,
-    onOpenSeries: (SeriesShow) -> Unit
+    onOpenSeries: (SeriesShow) -> Unit,
+    whatsStatus: SyncPrefs.WhatsStatus,
+    whatsRefreshing: Boolean,
+    onRefreshWhats: () -> Unit
 ) {
     when (state) {
         is LoadState.Loading -> CenteredNote("Loading...")
-        is LoadState.Error -> CenteredNote("Could not load What's New - ${state.message}")
+        is LoadState.Error -> CenteredNote("Could not load Discover - ${state.message}")
         is LoadState.Success -> {
             val data = state.data
             if (data.isEmpty) {
-                CenteredNote("What's Hot is getting ready - come back in a minute.")
+                Column {
+                    DiscoverStatusRow(whatsStatus, whatsRefreshing, onRefreshWhats)
+                    CenteredNote("Discover is getting ready - come back in a minute.")
+                }
                 return
             }
             val savedMovies = movieFavorites.map { it.streamId }.toSet()
@@ -104,6 +115,7 @@ fun WhatsNewScreen(
                 contentPadding = PaddingValues(vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
+                item { DiscoverStatusRow(whatsStatus, whatsRefreshing, onRefreshWhats) }
                 item {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -124,6 +136,45 @@ fun WhatsNewScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+// When this phone last fetched the lists from OMT (and when OMT built them),
+// with a small Refresh button. A failed fetch shows its error instead.
+@Composable
+private fun DiscoverStatusRow(status: SyncPrefs.WhatsStatus, refreshing: Boolean, onRefresh: () -> Unit) {
+    val format = remember { SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()) }
+    fun stamp(millis: Long?) = millis?.let { format.format(Date(it)) } ?: "never"
+    val serverBuilt = status.serverGenerated?.takeIf { it.isNotBlank() }?.let { iso ->
+        runCatching { format.format(Date(java.time.Instant.parse(iso.replace("+00:00", "Z")).toEpochMilli())) }.getOrNull()
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp)
+    ) {
+        if (status.error != null) {
+            Text(
+                text = "Update failed: ${status.error}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            Text(
+                text = "Updated ${stamp(status.syncedAt)}" + (serverBuilt?.let { " · list $it" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        TextButton(onClick = { if (!refreshing) onRefresh() }, enabled = !refreshing) {
+            Text(if (refreshing) "Refreshing..." else "Refresh")
         }
     }
 }

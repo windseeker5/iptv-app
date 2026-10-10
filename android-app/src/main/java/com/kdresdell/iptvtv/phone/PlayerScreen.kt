@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -104,9 +105,18 @@ private fun buildPlayer(context: Context): ExoPlayer {
         .build()
     // If a decoder fails to start, fall back to the next one instead of
     // erroring out.
+    //
+    // Audio goes through FFmpeg first (EXTENSION_RENDERER_MODE_PREFER). The
+    // Pixel's own Dolby decoder (c2.dolby.eac3.decoder.eac3) claims to
+    // support E-AC3 but fails on Dolby Atmos tracks - NF "Below" in English
+    // never started (playerFailed, Error 0x80000000) while its plain E-AC3
+    // French track played. "Supported but fails" can't be routed around by
+    // decoder fallback, so FFmpeg decodes audio instead; formats it lacks
+    // still fall through to the phone's decoders. Video is unaffected.
     val renderers = DefaultRenderersFactory(context)
         .setEnableDecoderFallback(true)
         .setMediaCodecSelector(preferSoftwareAvcSelector)
+        .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
     return ExoPlayer.Builder(context, renderers)
         .setLoadControl(loadControl)
         .build()
@@ -156,7 +166,14 @@ fun PlayerScreen(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, onBack: 
     var castDeviceName by remember { mutableStateOf<String?>(null) }
     var castError by remember { mutableStateOf<String?>(null) }
 
+    // Audio language / subtitle picker - movies and episodes only (live
+    // channels have nothing to choose). Choice is remembered by language.
+    val trackChoices = rememberTrackChoices(player)
+    val trackPrefs = remember { TrackPrefs(context) }
+    var showTrackPicker by remember { mutableStateOf(false) }
+
     DisposableEffect(item) {
+        if (!item.isLive) player.applyTrackPrefs(trackPrefs)
         player.setLiveStream(item.streamUrl)
         player.prepare()
         player.playWhenReady = castContext?.sessionManager?.currentCastSession?.isConnected != true
@@ -323,13 +340,19 @@ fun PlayerScreen(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, onBack: 
     }
 
     val onStopCasting = { castContext?.sessionManager?.endCurrentSession(true); Unit }
+    // Not while casting: the TV plays its own copy of the stream.
+    val canPickTracks = !item.isLive && castDeviceName == null
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (isLandscape) {
             Box(modifier = Modifier.fillMaxSize()) {
                 VideoArea(player, castDeviceName, castError, onStopCasting, Modifier.fillMaxSize())
-                if (castContext != null) {
-                    CastButton(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (canPickTracks) TracksButton { showTrackPicker = true }
+                    if (castContext != null) CastButton()
                 }
             }
         } else {
@@ -349,6 +372,7 @@ fun PlayerScreen(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, onBack: 
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    if (canPickTracks) TracksButton { showTrackPicker = true }
                     if (castContext != null) CastButton()
                 }
                 VideoArea(
@@ -361,6 +385,22 @@ fun PlayerScreen(item: NowPlaying, db: CatalogDatabase, api: XtreamApi, onBack: 
                 PlayerInfoPanel(item = item, db = db, api = api, modifier = Modifier.weight(1f))
             }
         }
+        if (showTrackPicker && canPickTracks) {
+            TrackPickerDialog(
+                choices = trackChoices,
+                onSelectTrack = { player.selectTrack(it, trackPrefs) },
+                onSubtitlesOff = { player.turnSubtitlesOff(trackPrefs) },
+                onDismiss = { showTrackPicker = false }
+            )
+        }
+    }
+}
+
+// Opens the audio/subtitle picker; sits next to the Cast icon.
+@Composable
+private fun TracksButton(onClick: () -> Unit) {
+    TextButton(onClick = onClick) {
+        Text("Audio & subs", color = Color.White)
     }
 }
 

@@ -31,6 +31,39 @@ class SyncPrefs(context: Context) {
         prefs.edit().putLong(KEY_WHATS, atMillis).apply()
     }
 
+    // What the Discover screen shows about the last download of the lists.
+    // Same keys as the TV app. syncedAt is the last SUCCESSFUL download;
+    // attemptAt/error describe the latest try, so a failure is visible even
+    // though the old lists stay in use.
+    class WhatsStatus(
+        val syncedAt: Long?,
+        val attemptAt: Long?,
+        val error: String?,
+        val serverGenerated: String?
+    )
+
+    fun recordWhatsSuccess(generated: String) {
+        prefs.edit()
+            .putLong(KEY_WHATS_ATTEMPT, System.currentTimeMillis())
+            .remove(KEY_WHATS_ERROR)
+            .putString(KEY_WHATS_GENERATED, generated)
+            .apply()
+    }
+
+    fun recordWhatsFailure(message: String) {
+        prefs.edit()
+            .putLong(KEY_WHATS_ATTEMPT, System.currentTimeMillis())
+            .putString(KEY_WHATS_ERROR, message)
+            .apply()
+    }
+
+    fun whatsStatus() = WhatsStatus(
+        syncedAt = prefs.getLong(KEY_WHATS, 0L).takeIf { it > 0 },
+        attemptAt = prefs.getLong(KEY_WHATS_ATTEMPT, 0L).takeIf { it > 0 },
+        error = prefs.getString(KEY_WHATS_ERROR, null),
+        serverGenerated = prefs.getString(KEY_WHATS_GENERATED, null)
+    )
+
     // The guide cache only covers the channels that were saved when it was
     // fetched, so it's stale if it's old OR a channel was added since.
     fun isEpgStale(wantedEpgIds: Set<String>, nowMillis: Long = System.currentTimeMillis()): Boolean {
@@ -49,6 +82,9 @@ class SyncPrefs(context: Context) {
         private const val KEY_EPG_IDS = "epg_synced_ids"
         private const val KEY_RATINGS = "ratings_synced_at"
         private const val KEY_WHATS = "whats_synced_at"
+        private const val KEY_WHATS_ATTEMPT = "whats_attempt_at"
+        private const val KEY_WHATS_ERROR = "whats_error"
+        private const val KEY_WHATS_GENERATED = "whats_generated"
         private const val RATINGS_MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
 
         // Same max age as the TV app's EpgSync. xmltv.php covers ~2 days.

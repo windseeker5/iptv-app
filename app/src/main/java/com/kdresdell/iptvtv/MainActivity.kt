@@ -382,6 +382,31 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Settings' "Refresh What's Hot now": just the OMT lists, so it
+            // is quick and safe to press while debugging.
+            var whatsStatus by remember { mutableStateOf(channelDb.whatsStatus()) }
+            var whatsRefreshing by remember { mutableStateOf(false) }
+            val onRefreshWhats: () -> Unit = {
+                if (!whatsRefreshing) {
+                    whatsRefreshing = true
+                    coroutineScope.launch {
+                        try {
+                            catalogRefresher.refreshWhatsNow()
+                            whatsNewVersion++
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLog.log("Manual What's Hot refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                        } finally {
+                            whatsRefreshing = false
+                            whatsStatus = channelDb.whatsStatus()
+                        }
+                    }
+                }
+            }
+            // The automatic launch/daily refreshes also update the status.
+            LaunchedEffect(whatsNewVersion) { whatsStatus = channelDb.whatsStatus() }
+
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -500,7 +525,8 @@ class MainActivity : ComponentActivity() {
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = currentScreen)
                             },
                             onToggleFavorite = toggleFavorite,
-                            onBack = { screen = Screen.Categories }
+                            onBack = { screen = Screen.Categories },
+                            streamUrlFor = { id -> api.liveStreamUrl(id) }
                         )
                     }
                 }
@@ -658,7 +684,10 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenEpisodes = { series -> screen = Screen.SeriesEpisodes(series, returnTo = Screen.WhatsNew) },
                             onToggleMovieSaved = toggleMovieSaved,
-                            onToggleSeriesSaved = toggleSeriesSaved
+                            onToggleSeriesSaved = toggleSeriesSaved,
+                            whatsStatus = whatsStatus,
+                            whatsRefreshing = whatsRefreshing,
+                            onRefreshWhats = onRefreshWhats
                         )
                     }
                 }

@@ -152,15 +152,35 @@ private fun App() {
             false
         }
     }
+    var whatsStatus by remember { mutableStateOf(syncPrefs.whatsStatus()) }
+    var whatsRefreshing by remember { mutableStateOf(false) }
     val syncWhats: suspend () -> Boolean = {
         try {
-            ratingsDownloader.syncWhats()
+            val result = ratingsDownloader.syncWhats()
             syncPrefs.markWhatsSynced()
+            syncPrefs.recordWhatsSuccess(result.generated)
+            whatsStatus = syncPrefs.whatsStatus()
             true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            syncPrefs.recordWhatsFailure(e.message ?: e.javaClass.simpleName)
+            whatsStatus = syncPrefs.whatsStatus()
             false
+        }
+    }
+    // Discover's Refresh button: just the OMT lists, no provider download.
+    val whatsScope = rememberCoroutineScope()
+    val onRefreshWhats: () -> Unit = {
+        if (!whatsRefreshing) {
+            whatsRefreshing = true
+            whatsScope.launch {
+                try {
+                    if (syncWhats()) catalogVersion++
+                } finally {
+                    whatsRefreshing = false
+                }
+            }
         }
     }
 
@@ -352,7 +372,10 @@ private fun App() {
                     onToggleSeriesFavorite = { seriesFavorites = vodFavoritesStore.toggleSeries(it, seriesFavorites) },
                     onPlay = { screen = PhoneScreen.Player(it) },
                     onOpenSeries = { screen = PhoneScreen.Episodes(it) },
-                    onRefresh = { refreshTrigger++ }
+                    onRefresh = { refreshTrigger++ },
+                    whatsStatus = whatsStatus,
+                    whatsRefreshing = whatsRefreshing,
+                    onRefreshWhats = onRefreshWhats
                 ) }
             }
             syncOverlay(true)
@@ -386,7 +409,10 @@ private fun HomeTabs(
     onToggleSeriesFavorite: (SeriesShow) -> Unit,
     onPlay: (NowPlaying) -> Unit,
     onOpenSeries: (SeriesShow) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    whatsStatus: SyncPrefs.WhatsStatus,
+    whatsRefreshing: Boolean,
+    onRefreshWhats: () -> Unit
 ) {
     var section by rememberSaveable { mutableStateOf(Section.MY_TV) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -428,7 +454,7 @@ private fun HomeTabs(
                 DrawerItem("Search", Icons.Filled.Search, section == Section.SEARCH) { goTo(Section.SEARCH) }
                 DrawerItem("My TV", Icons.Filled.Home, section == Section.MY_TV) { goTo(Section.MY_TV) }
                 DrawerItem("My Library", Icons.Filled.Star, section == Section.MY_LIBRARY) { goTo(Section.MY_LIBRARY) }
-                DrawerItem("What's Hot", Icons.Filled.ThumbUp, section == Section.WHATS_NEW) { goTo(Section.WHATS_NEW) }
+                DrawerItem("Discover", Icons.Filled.ThumbUp, section == Section.WHATS_NEW) { goTo(Section.WHATS_NEW) }
                 DrawerItem("All", Icons.AutoMirrored.Filled.List, section == Section.ALL) { goTo(Section.ALL) }
                 HorizontalDivider(
                     modifier = Modifier.padding(vertical = 8.dp),
@@ -560,7 +586,10 @@ private fun HomeTabs(
                         onToggleMovieFavorite = onToggleMovieFavorite,
                         onToggleSeriesFavorite = onToggleSeriesFavorite,
                         onPlay = onPlay,
-                        onOpenSeries = onOpenSeries
+                        onOpenSeries = onOpenSeries,
+                        whatsStatus = whatsStatus,
+                        whatsRefreshing = whatsRefreshing,
+                        onRefreshWhats = onRefreshWhats
                     )
                 }
                 Section.ALL -> AllScreen(

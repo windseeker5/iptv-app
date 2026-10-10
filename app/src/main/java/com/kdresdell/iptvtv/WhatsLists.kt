@@ -51,16 +51,22 @@ object WhatsLists {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // {"hot": {"movie": {"en": [item, ...]}}} -> map keyed "hot/movie/en".
-    fun download(): Map<String, List<Item>> {
+    // The parsed lists plus the server's own "generated" timestamp (when OMT
+    // built the file), shown in Settings so a stale server file is visible.
+    class Download(val generated: String, val lists: Map<String, List<Item>>)
+
+    fun download(): Download {
         val request = Request.Builder().url(WHATS_URL).build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw XtreamApiException("What's Hot server returned HTTP ${response.code}")
             val body = response.body?.string()?.takeIf { it.isNotBlank() }
                 ?: throw XtreamApiException("Empty What's Hot file")
-            return parse(JSONObject(body))
+            val json = JSONObject(body)
+            return Download(json.optString("generated"), parse(json))
         }
     }
+
+    // {"hot": {"movie": {"en": [item, ...]}}} -> map keyed "hot/movie/en".
 
     fun parse(json: JSONObject): Map<String, List<Item>> {
         val out = HashMap<String, List<Item>>()

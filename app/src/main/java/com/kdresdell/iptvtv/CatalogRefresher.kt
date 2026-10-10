@@ -56,12 +56,29 @@ class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDa
         step("What's Hot lists") { syncWhats() }
     }
 
+    // Settings' "Refresh What's Hot now": only the lists, no provider call,
+    // regardless of age. Failures are thrown so the screen can show them.
+    suspend fun refreshWhatsNow() = withContext(Dispatchers.IO) { syncWhats() }
+
     private fun syncWhats() {
-        val lists = WhatsLists.download()
-        val matches = WhatsLists.match(lists, "movie") { onRow -> db.forEachCatalogRow("movie", onRow) } +
-            WhatsLists.match(lists, "tv") { onRow -> db.forEachCatalogRow("tv", onRow) }
-        AppLog.log("What's Hot lists: ${matches.size} titles found in your catalog")
-        if (!db.replaceWhatsMatches(matches)) throw XtreamApiException("None of the What's Hot titles are in your catalog yet")
+        try {
+            val download = WhatsLists.download()
+            val lists = download.lists
+            val matches = WhatsLists.match(lists, "movie") { onRow -> db.forEachCatalogRow("movie", onRow) } +
+                WhatsLists.match(lists, "tv") { onRow -> db.forEachCatalogRow("tv", onRow) }
+            AppLog.log("What's Hot lists (built ${download.generated}): ${matches.size} titles found in your catalog")
+            if (!db.replaceWhatsMatches(matches)) throw XtreamApiException("None of the What's Hot titles are in your catalog yet")
+            db.recordWhatsSuccess(
+                download.generated,
+                lists.mapValues { it.value.size },
+                matches.groupingBy { "${it.list}/${it.kind}/${it.lang}" }.eachCount()
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            db.recordWhatsFailure(e.message ?: e.javaClass.simpleName)
+            throw e
+        }
     }
 
     // Settings' "Refresh list now": re-downloads everything regardless of

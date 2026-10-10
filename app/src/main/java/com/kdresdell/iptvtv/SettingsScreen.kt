@@ -148,7 +148,7 @@ private fun SettingsField(
 // shape used for content rows - a real button reads as a button, not
 // another row.
 @Composable
-private fun PrimaryActionButton(
+internal fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -158,7 +158,9 @@ private fun PrimaryActionButton(
     // focus to the next item below at all, despite it being visible on
     // screen. onPreviewKeyEvent runs ahead of Card's own key handling, same
     // fix pattern as the text fields above.
-    onDirectionDown: (() -> Boolean)? = null
+    onDirectionDown: (() -> Boolean)? = null,
+    // Small pill for inline use (e.g. beside a screen title).
+    compact: Boolean = false
 ) {
     val pillShape = RoundedCornerShape(50)
     val accent = LocalAppColors.current.vividAccent
@@ -190,8 +192,8 @@ private fun PrimaryActionButton(
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp)
+            style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
+            modifier = if (compact) Modifier.padding(horizontal = 18.dp, vertical = 6.dp) else Modifier.padding(horizontal = 28.dp, vertical = 14.dp)
         )
     }
 }
