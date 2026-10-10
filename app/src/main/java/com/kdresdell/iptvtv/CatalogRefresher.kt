@@ -10,32 +10,74 @@ import org.json.JSONObject
 private const val RATINGS_URL = "https://omt.dresdell.com/ratings.json"
 private const val MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
 
-// The daily background job behind What's New: keeps the provider's movie and
-// series lists fresh (they used to be downloaded once and never updated) and
-// downloads the IMDb score file the KD server builds every night. Runs on a
+// The daily background job behind What's Hot / What's New: downloads the
+// lists the KD server builds every night (WhatsLists) and matches them to
+// this catalog, keeps the provider's movie and series lists fresh (they used
+// to be downloaded once and never updated) and downloads the IMDb scores. Runs on a
 // low-priority background thread so it never competes with video playback,
 // and every step fails on its own - a provider or server hiccup just means
 // "try again later", never a broken screen.
 class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDatabase) {
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
 
     // Returns true when anything new was stored.
     suspend fun refreshIfStale(): Boolean = withContext(Dispatchers.IO) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
         try {
-            var changed = false
+            // What's Hot first: one small download, no provider call, so even
+            // a slow box that gets interrupted has fresh lists.
+            var changed = refreshWhatsIfStale()
+            var catalogChanged = false
             if (db.isVodStale(MAX_AGE_MILLIS)) {
-                changed = step("movies") { api.syncAllVodStreamsInto(db) } || changed
+                catalogChanged = step("movies") { api.syncAllVodStreamsInto(db) } || catalogChanged
             }
             if (db.isSeriesStale(MAX_AGE_MILLIS)) {
-                changed = step("series") { api.syncAllSeriesInto(db) } || changed
+                catalogChanged = step("series") { api.syncAllSeriesInto(db) } || catalogChanged
             }
+            // A new catalog means new rows to match.
+            if (catalogChanged) changed = step("What's Hot lists") { syncWhats() } || changed
             if (db.isRatingsStale(MAX_AGE_MILLIS)) {
                 changed = step("IMDb scores") { downloadRatings() } || changed
             }
-            changed
+            changed || catalogChanged
         } finally {
             Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT)
+        }
+    }
+
+    // Called on launch (no 60 s wait) and by the daily job: downloads the
+    // What's Hot / What's New lists when there are none yet or they are a day
+    // old. True when new matches were stored.
+    suspend fun refreshWhatsIfStale(): Boolean = withContext(Dispatchers.IO) {
+        if (db.hasWhatsMatches() && !db.isWhatsStale(MAX_AGE_MILLIS)) return@withContext false
+        step("What's Hot lists") { syncWhats() }
+    }
+
+    // Settings' "Refresh What's Hot now": only the lists, no provider call,
+    // regardless of age. Failures are thrown so the screen can show them.
+    suspend fun refreshWhatsNow() = withContext(Dispatchers.IO) { syncWhats() }
+
+    private fun syncWhats() {
+        try {
+            val download = WhatsLists.download()
+            val lists = download.lists
+            val matches = WhatsLists.match(lists, "movie") { onRow -> db.forEachCatalogRow("movie", onRow) } +
+                WhatsLists.match(lists, "tv") { onRow -> db.forEachCatalogRow("tv", onRow) }
+            AppLog.log("What's Hot lists (built ${download.generated}): ${matches.size} titles found in your catalog")
+            if (!db.replaceWhatsMatches(matches)) throw XtreamApiException("None of the What's Hot titles are in your catalog yet")
+            db.recordWhatsSuccess(
+                download.generated,
+                lists.mapValues { it.value.size },
+                matches.groupingBy { "${it.list}/${it.kind}/${it.lang}" }.eachCount()
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            db.recordWhatsFailure(e.message ?: e.javaClass.simpleName)
+            throw e
         }
     }
 
@@ -54,7 +96,8 @@ class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDa
         api.syncAllVodStreamsInto(db, report(2, "Downloading movies...", "movies"))
         report(3, "Downloading TV shows...", "shows")(0)
         api.syncAllSeriesInto(db, report(3, "Downloading TV shows...", "shows"))
-        report(4, "Downloading IMDb scores...", "")(0)
+        report(4, "Downloading What's Hot and IMDb scores...", "")(0)
+        step("What's Hot lists") { syncWhats() }
         step("IMDb scores") { downloadRatings() }
     }
 

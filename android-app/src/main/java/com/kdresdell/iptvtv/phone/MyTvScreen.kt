@@ -121,7 +121,7 @@ fun MyTvScreen(
                 title = TitleFormat.clean(channel.name),
                 category = categoryNames[channel.categoryId] ?: "",
                 description = description,
-                onClick = { onPlay(api.liveNowPlaying(channel.name, channel.streamId)) },
+                onClick = { onPlay(api.liveNowPlaying(channel)) },
                 onRemove = { removeWithUndo(channel) },
                 imageSize = LogoSize,
                 imageIsLogo = true

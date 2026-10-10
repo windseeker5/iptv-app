@@ -331,6 +331,17 @@ class MainActivity : ComponentActivity() {
             val catalogRefresher = remember(credentials) { CatalogRefresher(XtreamApi(credentials), channelDb) }
             LaunchedEffect(catalogRefresher) {
                 if (!credentials.isComplete) return@LaunchedEffect
+                // What's Hot lists right away: a small download matched to the
+                // catalog already on the device, so What's New works within
+                // seconds of launch even on boxes that kill the app in the
+                // background before the slower daily refresh finishes.
+                try {
+                    if (catalogRefresher.refreshWhatsIfStale()) whatsNewVersion++
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.log("What's Hot download failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
                 delay(60_000L)
                 while (true) {
                     try {
@@ -370,6 +381,31 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            // Settings' "Refresh What's Hot now": just the OMT lists, so it
+            // is quick and safe to press while debugging.
+            var whatsStatus by remember { mutableStateOf(channelDb.whatsStatus()) }
+            var whatsRefreshing by remember { mutableStateOf(false) }
+            val onRefreshWhats: () -> Unit = {
+                if (!whatsRefreshing) {
+                    whatsRefreshing = true
+                    coroutineScope.launch {
+                        try {
+                            catalogRefresher.refreshWhatsNow()
+                            whatsNewVersion++
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLog.log("Manual What's Hot refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                        } finally {
+                            whatsRefreshing = false
+                            whatsStatus = channelDb.whatsStatus()
+                        }
+                    }
+                }
+            }
+            // The automatic launch/daily refreshes also update the status.
+            LaunchedEffect(whatsNewVersion) { whatsStatus = channelDb.whatsStatus() }
 
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
@@ -489,7 +525,8 @@ class MainActivity : ComponentActivity() {
                                 screen = Screen.NowPlaying(PlayableItem.Live(channel), returnTo = currentScreen)
                             },
                             onToggleFavorite = toggleFavorite,
-                            onBack = { screen = Screen.Categories }
+                            onBack = { screen = Screen.Categories },
+                            streamUrlFor = { id -> api.liveStreamUrl(id) }
                         )
                     }
                 }
@@ -621,7 +658,15 @@ class MainActivity : ComponentActivity() {
                     // queries); reloads after each background refresh.
                     LaunchedEffect(whatsNewVersion) {
                         whatsNewState = try {
-                            LoadState.Success(withContext(Dispatchers.IO) { WhatsNewContent.load(channelDb) })
+                            LoadState.Success(withContext(Dispatchers.IO) {
+                                var content = WhatsNewContent.load(channelDb)
+                                // Nothing matched yet (first launch, or the launch
+                                // download failed): try once more right now.
+                                if (content.isEmpty && catalogRefresher.refreshWhatsIfStale()) {
+                                    content = WhatsNewContent.load(channelDb)
+                                }
+                                content
+                            })
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -639,7 +684,10 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenEpisodes = { series -> screen = Screen.SeriesEpisodes(series, returnTo = Screen.WhatsNew) },
                             onToggleMovieSaved = toggleMovieSaved,
-                            onToggleSeriesSaved = toggleSeriesSaved
+                            onToggleSeriesSaved = toggleSeriesSaved,
+                            whatsStatus = whatsStatus,
+                            whatsRefreshing = whatsRefreshing,
+                            onRefreshWhats = onRefreshWhats
                         )
                     }
                 }

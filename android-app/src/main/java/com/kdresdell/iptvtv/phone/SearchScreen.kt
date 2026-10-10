@@ -181,7 +181,7 @@ fun SearchScreen(
                         isFavorite = liveFavorites.any { it.streamId == result.channel.streamId },
                         onClick = {
                             recordSearch()
-                            onPlay(api.liveNowPlaying(result.channel.name, result.channel.streamId))
+                            onPlay(api.liveNowPlaying(result.channel))
                         },
                         onToggleFavorite = { onToggleLiveFavorite(result.channel) },
                         favoriteLabel = "My TV"
@@ -192,7 +192,7 @@ fun SearchScreen(
                         onClick = {
                             recordSearch()
                             onPlay(
-                                api.vodNowPlaying(result.movie.name, result.movie.streamId, result.movie.containerExtension)
+                                api.vodNowPlaying(result.movie)
                             )
                         },
                         onToggleFavorite = { onToggleMovieFavorite(result.movie) },

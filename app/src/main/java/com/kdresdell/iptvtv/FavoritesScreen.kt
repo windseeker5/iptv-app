@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -40,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -54,8 +57,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
+import android.view.TextureView
 import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
@@ -302,9 +307,27 @@ private fun EpgTimelineGrid(
             ?.takeIf { it >= 0 } ?: 0
     }
 
-    LaunchedEffect(Unit) {
-        if (favorites.isNotEmpty()) {
-            firstItemFocusRequester.requestFocus()
+    // Back from full-screen lands here with nothing highlighted unless the
+    // watched channel's row exists yet: the list starts at the top and only
+    // draws the rows on screen, so a channel further down has no row to focus,
+    // and a single request at open (the old code) simply went nowhere. Scroll
+    // to that row first, then retry until it really holds focus. Keyed on
+    // "has channels" so a guide that fills in after opening is covered too.
+    var initialFocusLanded by remember { mutableStateOf(false) }
+    LaunchedEffect(favorites.isNotEmpty()) {
+        if (favorites.isEmpty()) return@LaunchedEffect
+        runCatching { wrap.listState.scrollToItem(max(0, initialFocusIndex - 2)) }
+        repeat(20) {
+            if (initialFocusLanded) return@LaunchedEffect
+            runCatching { firstItemFocusRequester.requestFocus() }
+            delay(50)
+        }
+        // Still nothing after a second: leave the guide usable rather than
+        // dead - the first visible row takes focus.
+        if (!initialFocusLanded) {
+            runCatching { wrap.listState.scrollToItem(0) }
+            delay(50)
+            runCatching { firstItemFocusRequester.requestFocus() }
         }
     }
 
@@ -405,7 +428,10 @@ private fun EpgTimelineGrid(
                             onRemoveFavorite = { onRemove(channel) },
                             recordAction = recordActionFor(channel),
                             onFocused = { onFocusedChannelChanged(channel) },
-                            rowModifier = (if (index == initialFocusIndex) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
+                            rowModifier = (if (index == initialFocusIndex) {
+                                Modifier.focusRequester(firstItemFocusRequester)
+                                    .onFocusChanged { if (it.hasFocus) initialFocusLanded = true }
+                            } else Modifier)
                                 .then(wrap.itemModifier(index))
                         )
                     }
@@ -528,8 +554,15 @@ private fun TopPreviewBlock(
 // Not the primary playback surface (that's PlayerScreen); torn down
 // whenever the stream URL changes or the guide is left, same lifecycle
 // pattern as PlayerScreen's own ExoPlayer.
+//
+// Draws into a TextureView, not PlayerView's default SurfaceView: a
+// SurfaceView sits behind the app window and shows through a "hole", and
+// the rounded/clipped preview boxes covered that hole after the first redraw
+// - sound kept playing but the picture went black after ~1s (seen on the
+// Chromecast, 2026-10-10). A TextureView is drawn like any other view. Set
+// once on this preview's own player, never hot-swapped (see the note below).
 @Composable
-private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
+fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val exoPlayer = remember(streamUrl) {
         ExoPlayer.Builder(context).build().apply {
@@ -538,20 +571,31 @@ private fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
             playWhenReady = true
         }
     }
+    // Keeps 4:3 channels from being stretched to fill the 16:9 box.
+    var aspect by remember(exoPlayer) { mutableStateOf(16f / 9f) }
     DisposableEffect(exoPlayer) {
-        onDispose { exoPlayer.release() }
-    }
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = false
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
+        val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    aspect = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+                }
             }
-        },
-        update = { view -> view.player = exoPlayer }
-    )
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
+    }
+    Box(modifier = modifier.background(androidx.compose.ui.graphics.Color.Black), contentAlignment = Alignment.Center) {
+        // Keyed so a new channel (new player) gets a fresh view attached to it.
+        key(exoPlayer) {
+            AndroidView(
+                modifier = Modifier.aspectRatio(aspect),
+                factory = { ctx -> TextureView(ctx).also { exoPlayer.setVideoTextureView(it) } }
+            )
+        }
+    }
 }
 
 // A live video surface for the embedded/reduced preview was tried and

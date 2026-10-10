@@ -1,10 +1,11 @@
 package com.kdresdell.iptvtv.phone
 
-// TODO: duplicated from the TV app's XtreamApi.kt, trimmed (no streaming
-// JsonReader sync - plain JSONArray parse is fine at this catalog size) for
-// the phone draft. Extract a shared :core module later instead of
+// TODO: duplicated from the TV app's XtreamApi.kt, trimmed for the phone
+// draft. Extract a shared :core module later instead of
 // maintaining two copies.
 
+import android.util.JsonReader
+import android.util.JsonToken
 import android.util.Xml
 import java.io.InputStream
 import java.net.URLEncoder
@@ -38,15 +39,30 @@ data class VodStream(
     val name: String,
     val categoryId: String,
     val streamIcon: String = "",
-    val containerExtension: String = "mp4"
+    val containerExtension: String = "mp4",
+    // What's New only, same as the TV app: releaseYear is parsed from the
+    // "(2026)" in the name (0 = none), tmdb is the key into ratings.json,
+    // imdbRating is only filled in by CatalogDatabase.topMovies.
+    val releaseYear: Int = 0,
+    val tmdb: Int = 0,
+    val imdbRating: Double = 0.0
 )
 
 data class SeriesShow(
     val seriesId: Int,
     val name: String,
     val categoryId: String,
-    val cover: String = ""
+    val cover: String = "",
+    val releaseYear: Int = 0,
+    val tmdb: Int = 0,
+    val imdbRating: Double = 0.0
 )
+
+private val YEAR_IN_NAME = Regex("\\((?:19|20)\\d\\d\\)")
+
+// The provider puts the release year in the title, "EN - Moana (2026)".
+internal fun releaseYearFromName(name: String): Int =
+    YEAR_IN_NAME.find(name)?.value?.substring(1, 5)?.toIntOrNull() ?: 0
 
 data class SeriesEpisode(
     val episodeId: Int,
@@ -151,48 +167,92 @@ class XtreamApi(private val credentials: ProviderCredentials) {
         }
     }
 
-    suspend fun getLiveStreams(categoryId: String? = null): List<LiveChannel> {
-        val extra = categoryId?.let { "&category_id=${encode(it)}" } ?: ""
-        val body = getJson(playerApiUrl("get_live_streams", extra))
-        val array = parseArray(body, "Unexpected response listing channels")
-        return (0 until array.length()).map { i ->
-            val obj = array.getJSONObject(i)
-            LiveChannel(
-                streamId = obj.optInt("stream_id"),
-                name = obj.optString("name"),
-                categoryId = obj.optString("category_id"),
-                streamIcon = obj.optString("stream_icon"),
-                epgChannelId = obj.optString("epg_channel_id").takeIf { it != "null" } ?: ""
-            )
+    // The three catalogs are streamed straight into [consume] one item at a
+    // time instead of parsing the whole response - a real provider's movie
+    // list is big enough that holding the JSON text, a JSONArray and the
+    // parsed list at once ran the phone out of memory (2026-09-27).
+    suspend fun streamLiveStreams(consume: (Sequence<LiveChannel>) -> Unit) =
+        streamArray("get_live_streams", setOf("stream_id", "name", "category_id", "stream_icon", "epg_channel_id")) { rows ->
+            consume(rows.map { f ->
+                LiveChannel(
+                    streamId = f["stream_id"]?.toIntOrNull() ?: 0,
+                    name = f["name"] ?: "",
+                    categoryId = f["category_id"] ?: "",
+                    streamIcon = f["stream_icon"] ?: "",
+                    epgChannelId = f["epg_channel_id"] ?: ""
+                )
+            })
         }
-    }
 
-    suspend fun getVodStreams(): List<VodStream> {
-        val body = getJson(playerApiUrl("get_vod_streams"))
-        val array = parseArray(body, "Unexpected response listing movies")
-        return (0 until array.length()).map { i ->
-            val obj = array.getJSONObject(i)
-            VodStream(
-                streamId = obj.optInt("stream_id"),
-                name = obj.optString("name"),
-                categoryId = obj.optString("category_id"),
-                streamIcon = obj.optString("stream_icon"),
-                containerExtension = obj.optString("container_extension").ifBlank { "mp4" }
-            )
+    suspend fun streamVodStreams(consume: (Sequence<VodStream>) -> Unit) =
+        streamArray("get_vod_streams", setOf("stream_id", "name", "category_id", "stream_icon", "container_extension", "tmdb")) { rows ->
+            consume(rows.map { f ->
+                val name = f["name"] ?: ""
+                VodStream(
+                    streamId = f["stream_id"]?.toIntOrNull() ?: 0,
+                    name = name,
+                    categoryId = f["category_id"] ?: "",
+                    streamIcon = f["stream_icon"] ?: "",
+                    containerExtension = f["container_extension"]?.ifBlank { null } ?: "mp4",
+                    releaseYear = releaseYearFromName(name),
+                    tmdb = f["tmdb"]?.toIntOrNull() ?: 0
+                )
+            })
         }
-    }
 
-    suspend fun getSeriesList(): List<SeriesShow> {
-        val body = getJson(playerApiUrl("get_series"))
-        val array = parseArray(body, "Unexpected response listing series")
-        return (0 until array.length()).map { i ->
-            val obj = array.getJSONObject(i)
-            SeriesShow(
-                seriesId = obj.optInt("series_id"),
-                name = obj.optString("name"),
-                categoryId = obj.optString("category_id"),
-                cover = obj.optString("cover")
-            )
+    suspend fun streamSeriesList(consume: (Sequence<SeriesShow>) -> Unit) =
+        streamArray("get_series", setOf("series_id", "name", "category_id", "cover", "tmdb")) { rows ->
+            consume(rows.map { f ->
+                val name = f["name"] ?: ""
+                SeriesShow(
+                    seriesId = f["series_id"]?.toIntOrNull() ?: 0,
+                    name = name,
+                    categoryId = f["category_id"] ?: "",
+                    cover = f["cover"] ?: "",
+                    releaseYear = releaseYearFromName(name),
+                    tmdb = f["tmdb"]?.toIntOrNull() ?: 0
+                )
+            })
+        }
+
+    // Reads a top-level JSON array of objects, handing each one over as a
+    // small map of just the [wanted] fields (nulls skipped). Numbers come
+    // back as strings, so "stream_id": 5 and "stream_id": "5" both work.
+    private suspend fun streamArray(
+        action: String,
+        wanted: Set<String>,
+        consume: (Sequence<Map<String, String>>) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(playerApiUrl(action)).build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw XtreamApiException("Server returned HTTP ${response.code}")
+                val body = response.body ?: throw XtreamApiException("Empty response from server")
+                JsonReader(body.charStream()).use { json ->
+                    consume(sequence {
+                        json.beginArray()
+                        while (json.hasNext()) {
+                            val fields = HashMap<String, String>()
+                            json.beginObject()
+                            while (json.hasNext()) {
+                                val field = json.nextName()
+                                if (field in wanted && json.peek() != JsonToken.NULL) {
+                                    fields[field] = json.nextString()
+                                } else {
+                                    json.skipValue()
+                                }
+                            }
+                            json.endObject()
+                            yield(fields)
+                        }
+                        json.endArray()
+                    })
+                }
+            }
+        } catch (e: XtreamApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw XtreamApiException("Could not reach server: ${e.message}")
         }
     }
 
@@ -341,25 +401,45 @@ class XtreamApi(private val credentials: ProviderCredentials) {
     // The phone plays the raw .ts stream, but Chromecast's default receiver
     // can't play MPEG-TS over plain HTTP - it needs HLS, which Xtream serves
     // for the same channel at .m3u8.
-    fun liveNowPlaying(name: String, streamId: Int): NowPlaying {
-        val tsUrl = liveStreamUrl(streamId)
+    fun liveNowPlaying(channel: LiveChannel): NowPlaying {
+        val tsUrl = liveStreamUrl(channel.streamId)
         return NowPlaying(
-            title = name,
+            title = channel.name,
             streamUrl = tsUrl,
             castUrl = tsUrl.removeSuffix(".ts") + ".m3u8",
             castMimeType = "application/x-mpegURL",
-            isLive = true
+            isLive = true,
+            kind = CatalogKind.LIVE,
+            itemId = channel.streamId,
+            posterUrl = channel.streamIcon,
+            categoryId = channel.categoryId
         )
     }
 
-    fun vodNowPlaying(name: String, streamId: Int, containerExtension: String): NowPlaying {
-        val url = vodStreamUrl(streamId, containerExtension)
-        return NowPlaying(name, url, url, mimeForExtension(containerExtension))
+    fun vodNowPlaying(movie: VodStream): NowPlaying {
+        val url = vodStreamUrl(movie.streamId, movie.containerExtension)
+        return NowPlaying(
+            title = movie.name,
+            streamUrl = url,
+            castMimeType = mimeForExtension(movie.containerExtension),
+            kind = CatalogKind.VOD,
+            itemId = movie.streamId,
+            posterUrl = movie.streamIcon,
+            categoryId = movie.categoryId
+        )
     }
 
-    fun episodeNowPlaying(title: String, episodeId: Int, containerExtension: String): NowPlaying {
-        val url = seriesEpisodeUrl(episodeId, containerExtension)
-        return NowPlaying(title, url, url, mimeForExtension(containerExtension))
+    fun episodeNowPlaying(series: SeriesShow, episode: SeriesEpisode): NowPlaying {
+        val url = seriesEpisodeUrl(episode.episodeId, episode.containerExtension)
+        return NowPlaying(
+            title = "${series.name} S${episode.season}E${episode.episodeNum}",
+            streamUrl = url,
+            castMimeType = mimeForExtension(episode.containerExtension),
+            kind = CatalogKind.SERIES,
+            itemId = series.seriesId,
+            posterUrl = series.cover,
+            categoryId = series.categoryId
+        )
     }
 
     private fun mimeForExtension(ext: String): String = when (ext.lowercase()) {
