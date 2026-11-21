@@ -903,7 +903,11 @@ fun PlayerScreen(
                     }
             )
 
-            if (playbackError != null && !reduced) {
+            // Live channels show the reconnect notice instead (see
+            // LivePlaybackHolder.connection) - except the doorbell's hint.
+            if (playbackError != null && !reduced &&
+                (livePlaybackHolder == null || DoorbellChannel.isDoorbell(contentId))
+            ) {
                 Text(
                     text = if (DoorbellChannel.isDoorbell(contentId)) {
                         "Doorbell not reachable - are you on the home network?"

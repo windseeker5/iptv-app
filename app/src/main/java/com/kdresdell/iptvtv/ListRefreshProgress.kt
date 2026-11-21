@@ -54,7 +54,35 @@ data class ListRefreshProgress(
 // Small corner notice shown while the automatic launch refresh downloads
 // the provider lists, so a slower app for a few minutes has an explanation.
 @Composable
-fun AutoRefreshNotice(modifier: Modifier = Modifier) {
+fun AutoRefreshNotice(modifier: Modifier = Modifier) =
+    CornerNotice("Updating your lists...", "The app may be a bit slow for a few minutes.", busy = true, modifier = modifier)
+
+// Live channel dropped (LivePlaybackHolder): "reconnecting" while it retries,
+// then "check your internet" once it gives up.
+@Composable
+fun ConnectionNotice(connection: LiveConnection, modifier: Modifier = Modifier) {
+    when (connection) {
+        LiveConnection.Ok -> {}
+        LiveConnection.Reconnecting -> CornerNotice(
+            "Connection lost, reconnecting...",
+            "The channel will come back on its own.",
+            busy = true,
+            modifier = modifier
+        )
+        LiveConnection.GaveUp -> CornerNotice(
+            "Can't reach the channel",
+            "Check your internet or your TV provider. Press OK to try again.",
+            busy = false,
+            isError = true,
+            modifier = modifier
+        )
+    }
+}
+
+// The corner card both notices share: spinner (or a warning dot), a title
+// and one line of explanation, over whatever is on screen.
+@Composable
+fun CornerNotice(title: String, body: String, busy: Boolean, modifier: Modifier = Modifier, isError: Boolean = false) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier = modifier
@@ -65,20 +93,32 @@ fun AutoRefreshNotice(modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(24.dp),
-            color = colors.primary,
-            trackColor = colors.surface,
-            strokeWidth = 3.dp
-        )
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(24.dp),
+                color = colors.primary,
+                trackColor = colors.surface,
+                strokeWidth = 3.dp
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(if (isError) colors.error else colors.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "!", color = if (isError) colors.onError else colors.onPrimary, fontWeight = FontWeight.Bold)
+            }
+        }
         Column {
             Text(
-                text = "Updating your lists...",
+                text = title,
                 style = MaterialTheme.typography.titleSmall,
-                color = colors.onSurface
+                color = if (isError) colors.error else colors.onSurface
             )
             Text(
-                text = "The app may be a bit slow for a few minutes.",
+                text = body,
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant
             )
