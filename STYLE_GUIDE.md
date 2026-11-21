@@ -643,8 +643,9 @@ https://claude.ai/artifact/A9QVVdK5QYJNdKpMR81pmv, iterated to final.
   not a text caret.
 - **Update card**: outlined in plain gray (outline tone 30, `#435643`), **not**
   green — green is reserved for focus/action, not passive emphasis/callouts.
-- **Update and Save buttons**: primary tone-80 fill (`#A6F2A6`) — the two
-  "commit" actions on this screen, styled identically to any other primary button.
+- **Update and Save buttons** (and every other primary button): green outline
+  and green text when not selected; solid accent fill, black text and glow only
+  when selected, so it's obvious which of several buttons has focus (2026-10-28).
 - Section headers: Headline Small. Field labels: Title Small. Helper/error text:
   Label Medium, error text uses the standard M3 error role (§2.7), never green —
   the error log entries specifically must never read as "green = good."

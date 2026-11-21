@@ -1,5 +1,6 @@
 package com.kdresdell.iptvtv
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
@@ -137,7 +139,8 @@ private fun SettingsField(
     }
 }
 
-// §5/§6.7 primary "commit" action (Update, Save) - vivid-accent fill (the
+// §5/§6.7 primary "commit" action (Update, Save) - vivid-accent fill when
+// focused, outline when not (see colors below) (the
 // one "terminal green" used everywhere else - focus rings, progress bars,
 // and the player overlay's own play/pause circle, which is the exact
 // precedent this reuses: vivid accent fill + black content), not the pastel
@@ -179,15 +182,24 @@ internal fun PrimaryActionButton(
         },
         shape = CardDefaults.shape(pillShape),
         scale = appCardScale(),
+        // Only the focused button is filled (2026-10-28, user request):
+        // with every button solid green, the focused one differed only by a
+        // thin inset line and you couldn't tell Save from Refresh. Others
+        // are a green outline + green text on the dark background, so the
+        // fill visibly jumps from button to button as focus moves.
         colors = CardDefaults.colors(
-            containerColor = accent,
-            contentColor = Color.Black,
+            containerColor = Color.Transparent,
+            contentColor = accent,
             focusedContainerColor = accent,
             focusedContentColor = Color.Black,
             pressedContainerColor = accent,
             pressedContentColor = Color.Black
         ),
-        border = appCardBorder(shape = pillShape),
+        border = CardDefaults.border(
+            border = Border(border = BorderStroke(2.dp, accent), shape = pillShape),
+            focusedBorder = Border(border = BorderStroke(2.dp, accent), shape = pillShape),
+            pressedBorder = Border(border = BorderStroke(2.dp, accent), shape = pillShape)
+        ),
         glow = appCardGlow()
     ) {
         Text(
@@ -758,9 +770,8 @@ fun SettingsScreen(
         // show: an empty "Error Log / No errors logged" state had nothing
         // focusable below Save, so Down had nowhere to go and the section
         // was structurally unreachable (confirmed bug, not "no errors").
-        // Note this log is in-memory only (AppLog.kt) - it resets on every
-        // app restart, so "empty" only ever means "nothing since the last
-        // launch," never "this app has never errored." As of this pass,
+        // Saved to a file since 0.20 (AppLog.kt), and also holds playback
+        // health notes (PlaybackHealth.kt), hence "Log", not "Error Log". As of an earlier pass,
         // most of the app's actual error paths (XtreamApi network/parsing
         // failures surfaced through MainActivity.kt's LoadState.Error
         // branches, corrupt local favorites/saved-VOD data) now actually
@@ -772,7 +783,7 @@ fun SettingsScreen(
             item {
                 // Standard M3 error tone - never green, so this never reads
                 // as "green = good".
-                Text(text = "Error Log", style = sectionHeaderStyle(), color = MaterialTheme.colorScheme.onSurface)
+                Text(text = "Log", style = sectionHeaderStyle(), color = MaterialTheme.colorScheme.onSurface)
             }
             items(AppLog.entries) { entry ->
                 ErrorLogRow(entry)

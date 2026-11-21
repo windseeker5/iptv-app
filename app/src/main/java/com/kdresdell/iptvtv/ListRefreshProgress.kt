@@ -51,6 +51,41 @@ data class ListRefreshProgress(
 // the user may go off and watch something meanwhile): the logo gently
 // pulsing inside a spinning ring, the current step with a live count, a
 // step bar and "Step x of y". Display-only - not focusable.
+// Small corner notice shown while the automatic launch refresh downloads
+// the provider lists, so a slower app for a few minutes has an explanation.
+@Composable
+fun AutoRefreshNotice(modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = modifier
+            .widthIn(max = 420.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surfaceVariant.copy(alpha = 0.92f))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(24.dp),
+            color = colors.primary,
+            trackColor = colors.surface,
+            strokeWidth = 3.dp
+        )
+        Column {
+            Text(
+                text = "Updating your lists...",
+                style = MaterialTheme.typography.titleSmall,
+                color = colors.onSurface
+            )
+            Text(
+                text = "The app may be a bit slow for a few minutes.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant
+            )
+        }
+    }
+}
+
 @Composable
 fun ListRefreshProgressCard(progress: ListRefreshProgress) {
     val pulse = rememberInfiniteTransition(label = "logoPulse")

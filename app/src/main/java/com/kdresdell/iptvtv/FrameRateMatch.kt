@@ -30,21 +30,49 @@ import kotlin.math.roundToInt
 // unset for them - checked on the Chromecast), so when it's missing it is
 // measured from the timestamps of the first frames instead.
 //
-// VOD/episodes only: live channels are already 50/60Hz broadcasts, and a
-// blank screen on every channel change would be worse than the judder.
+// Live channels too since 0.20, but only when the feed doesn't already fit
+// the TV's current rate: most channels are 59.94fps and the TV already runs
+// at 59.94Hz, so zapping between them never blanks the screen. A 50fps or
+// 60.000fps feed on a 59.94Hz TV has to repeat or skip a frame on a steady
+// rhythm - a subtle stutter ("tired eyes") that was reported on sports
+// channels on the dining room Chromecast 4K, 2026-10-28. Never while the
+// video is shrunk into the guide (`active` false): browsing channels there
+// must not blank the screen.
 @OptIn(UnstableApi::class)
 @Composable
-fun MatchDisplayFrameRate(player: ExoPlayer, enabled: Boolean) {
+fun MatchDisplayFrameRate(player: ExoPlayer, contentId: Int, isLive: Boolean, active: Boolean) {
     val activity = LocalContext.current as? Activity ?: return
-    DisposableEffect(player, enabled) {
-        if (!enabled) return@DisposableEffect onDispose {}
+    // Back to the TV's default only when this player goes away, not between
+    // live channels - two 50fps channels in a row would otherwise blank the
+    // screen twice (once back to default, once to 50Hz again).
+    DisposableEffect(player) {
+        onDispose {
+            val window = activity.window
+            val params = window.attributes
+            if (params.preferredDisplayModeId != 0) {
+                params.preferredDisplayModeId = 0
+                window.attributes = params
+            }
+        }
+    }
+    DisposableEffect(player, contentId, active) {
+        if (!active) return@DisposableEffect onDispose {}
         val window = activity.window
         val mainHandler = Handler(Looper.getMainLooper())
 
         fun switchTo(fps: Float) {
             val display = window.decorView.display ?: return
+            val current = display.mode
+            if (isLive && isMultiple(current.refreshRate, fps)) {
+                AppLog.log("Video rhythm: feed ${fps.pretty()}fps, TV ${current.refreshRate.pretty()}Hz - OK")
+                return
+            }
             val mode = bestModeFor(fps, display)
             Log.i(TAG, "Video ${fps}fps -> display mode ${mode?.modeId} (${mode?.refreshRate}Hz)")
+            AppLog.log(
+                "Video rhythm: feed ${fps.pretty()}fps, TV ${current.refreshRate.pretty()}Hz - " +
+                    (mode?.let { "switching TV to ${it.refreshRate.pretty()}Hz" } ?: "TV has no matching rate")
+            )
             mode ?: return
             val params = window.attributes
             if (params.preferredDisplayModeId != mode.modeId) {
@@ -56,6 +84,9 @@ fun MatchDisplayFrameRate(player: ExoPlayer, enabled: Boolean) {
         // Called on the playback thread for every frame until a rate is found.
         val timestamps = ArrayList<Long>()
         var done = false
+        // The shared live player can still be showing the previous
+        // channel's last frames when this starts - don't measure those.
+        var skip = SKIP_FRAMES
         val listener = object : VideoFrameMetadataListener {
             override fun onVideoFrameAboutToBeRendered(
                 presentationTimeUs: Long,
@@ -64,6 +95,7 @@ fun MatchDisplayFrameRate(player: ExoPlayer, enabled: Boolean) {
                 mediaFormat: MediaFormat?
             ) {
                 if (done) return
+                if (skip > 0) { skip--; return }
                 val declared = format.frameRate.takeIf { it > 0f && it != Format.NO_VALUE.toFloat() }
                 val fps = declared ?: run {
                     // A gap outside 10-100fps means a seek or a hiccup: start over.
@@ -88,11 +120,6 @@ fun MatchDisplayFrameRate(player: ExoPlayer, enabled: Boolean) {
         onDispose {
             mainHandler.removeCallbacksAndMessages(null)
             player.clearVideoFrameMetadataListener(listener)
-            val params = window.attributes
-            if (params.preferredDisplayModeId != 0) {
-                params.preferredDisplayModeId = 0
-                window.attributes = params
-            }
         }
     }
 }
@@ -112,15 +139,21 @@ private fun bestModeFor(fps: Float, display: Display): Display.Mode? {
     val current = display.mode
     return display.supportedModes
         .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
-        .filter { mode ->
-            val multiple = (mode.refreshRate / fps).roundToInt()
-            multiple >= 1 && abs(mode.refreshRate - multiple * fps) / mode.refreshRate < 0.0005f
-        }
+        .filter { isMultiple(it.refreshRate, fps) }
         .maxByOrNull { it.refreshRate }
 }
+
+private fun isMultiple(refreshRate: Float, fps: Float): Boolean {
+    val multiple = (refreshRate / fps).roundToInt()
+    return multiple >= 1 && abs(refreshRate - multiple * fps) / refreshRate < 0.0005f
+}
+
+private fun Float.pretty(): String = String.format(java.util.Locale.US, "%.2f", this).trimEnd('0').trimEnd('.')
 
 // ~4s of 24fps video - long enough to tell 23.976 from 24 despite the
 // millisecond-rounded timestamps.
 private const val SAMPLE_FRAMES = 96
+
+private const val SKIP_FRAMES = 30
 
 private const val TAG = "KdtvFrameRate"

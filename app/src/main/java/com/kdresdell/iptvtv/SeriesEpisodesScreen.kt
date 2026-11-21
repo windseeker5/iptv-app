@@ -56,9 +56,22 @@ fun SeriesEpisodesScreen(
 
     // See CategoryListScreen for why this is needed - without it, D-pad
     // focus lands nowhere when this screen opens.
+    // Opens on "where you are": the episode you were last in the middle
+    // of, or the one after the last you finished (WatchHistory).
+    val startIndex = remember(state) {
+        (state as? LoadState.Success)?.data?.episodes?.let { resumeIndex(it) } ?: 0
+    }
     LaunchedEffect(state) {
         if (state is LoadState.Success && state.data.episodes.isNotEmpty()) {
-            firstItemFocus.requestFocus()
+            if (startIndex > 0) {
+                wrap.listState.scrollToItem(startIndex)
+                androidx.compose.runtime.withFrameNanos { }
+            }
+            try {
+                firstItemFocus.requestFocus()
+            } catch (e: IllegalStateException) {
+                // Row not laid out yet - focus stays where the list puts it.
+            }
         }
     }
 
@@ -121,7 +134,7 @@ fun SeriesEpisodesScreen(
                                 EpisodeRow(
                                     episode = episode,
                                     onSelect = { onSelectEpisode(episode) },
-                                    rowModifier = (if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                                    rowModifier = (if (index == startIndex) Modifier.focusRequester(firstItemFocus) else Modifier)
                                         .then(wrap.itemModifier(index))
                                 )
                             }
@@ -176,6 +189,21 @@ private fun SeriesHeader(
     }
 }
 
+// Index of the episode to land on: the most recently played one if it was
+// left part-way, else the one right after it (staying on the last episode
+// if the whole series is done). 0 when nothing was watched yet.
+private fun resumeIndex(episodes: List<SeriesEpisode>): Int {
+    var best = -1
+    var bestAt = 0L
+    episodes.forEachIndexed { i, ep ->
+        val e = WatchHistory.get(WatchHistory.EPISODE, ep.episodeId) ?: return@forEachIndexed
+        if (e.updatedAt > bestAt) { bestAt = e.updatedAt; best = i }
+    }
+    if (best < 0) return 0
+    val last = WatchHistory.get(WatchHistory.EPISODE, episodes[best].episodeId)
+    return if (last?.watched == true) minOf(best + 1, episodes.lastIndex) else best
+}
+
 // One full-width row per episode (back to the app's standard list pattern,
 // §5's row exception - no scale on focus), with that episode's own synopsis
 // underneath in smaller text when the provider actually supplies one.
@@ -196,9 +224,11 @@ private fun EpisodeRow(
         border = appCardBorder(shape = RoundedCornerShape(8.dp)),
         glow = appCardGlow()
     ) {
+        val watch = WatchHistory.get(WatchHistory.EPISODE, episode.episodeId)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
             Text(
-                text = "E${episode.episodeNum}" + if (episode.title.isNotBlank()) " · ${TitleFormat.clean(episode.title)}" else "",
+                text = (if (watch?.watched == true) "✓  " else "") +
+                    "E${episode.episodeNum}" + if (episode.title.isNotBlank()) " · ${TitleFormat.clean(episode.title)}" else "",
                 style = MaterialTheme.typography.labelMedium,
                 color = onSurface,
                 maxLines = 2,
@@ -212,6 +242,10 @@ private fun EpisodeRow(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+            // Started but not finished: how far in you are.
+            if (watch != null && !watch.watched && watch.fraction > 0.01f) {
+                WatchProgressBar(watch.fraction, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
             }
         }
     }

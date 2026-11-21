@@ -49,14 +49,15 @@ data class WhatsNewContent(val rows: List<WhatsNewRow>) {
     companion object {
         fun load(db: LiveChannelDatabase): WhatsNewContent = WhatsNewContent(
             listOf(
-                WhatsNewRow("Hot movies", movies = db.whatsMovies("hot", "en")),
-                WhatsNewRow("Hot series", series = db.whatsSeries("hot", "en")),
-                WhatsNewRow("New movies", movies = db.whatsMovies("new", "en")),
-                WhatsNewRow("New series", series = db.whatsSeries("new", "en")),
-                WhatsNewRow("Films populaires (français)", movies = db.whatsMovies("hot", "fr")),
-                WhatsNewRow("Séries populaires (français)", series = db.whatsSeries("hot", "fr")),
+                // Latest first (English, then French), the "hot" lists last.
+                WhatsNewRow("Latest movies", movies = db.whatsMovies("new", "en")),
+                WhatsNewRow("Latest series", series = db.whatsSeries("new", "en")),
                 WhatsNewRow("Nouveaux films (français)", movies = db.whatsMovies("new", "fr")),
-                WhatsNewRow("Nouvelles séries (français)", series = db.whatsSeries("new", "fr"))
+                WhatsNewRow("Nouvelles séries (français)", series = db.whatsSeries("new", "fr")),
+                WhatsNewRow("All-time best movies", movies = db.whatsMovies("hot", "en")),
+                WhatsNewRow("All-time best series", series = db.whatsSeries("hot", "en")),
+                WhatsNewRow("Meilleurs films de tous les temps (français)", movies = db.whatsMovies("hot", "fr")),
+                WhatsNewRow("Meilleures séries de tous les temps (français)", series = db.whatsSeries("hot", "fr"))
             ).filter { it.movies.isNotEmpty() || it.series.isNotEmpty() }
         )
     }
@@ -219,7 +220,8 @@ private fun LazyListScope.movieRow(
                     isSaved = isSaved(movie.streamId),
                     onOpen = { onPlay(movie) },
                     onToggleSaved = { onToggleSaved(movie) },
-                    cardModifier = focusFor(row, index == 0)
+                    cardModifier = focusFor(row, index == 0),
+                    movieId = movie.streamId
                 )
             }
         }
@@ -284,7 +286,8 @@ private fun PosterWithCaption(
     isSaved: Boolean,
     onOpen: () -> Unit,
     onToggleSaved: () -> Unit,
-    cardModifier: Modifier
+    cardModifier: Modifier,
+    movieId: Int? = null
 ) {
     val shown = displayTitle(title)
     Column(
@@ -297,7 +300,8 @@ private fun PosterWithCaption(
             isSaved = isSaved,
             onOpen = onOpen,
             onToggleSaved = onToggleSaved,
-            cardModifier = cardModifier
+            cardModifier = cardModifier,
+            movieId = movieId
         )
         Text(
             text = shown,

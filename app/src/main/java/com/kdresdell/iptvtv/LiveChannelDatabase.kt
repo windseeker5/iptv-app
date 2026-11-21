@@ -736,6 +736,9 @@ class LiveChannelDatabase(context: Context) :
     fun isVodStale(maxAgeMillis: Long): Boolean =
         isVodEmpty() || System.currentTimeMillis() - syncPrefs.getLong("vod_synced_at", 0L) > maxAgeMillis
 
+    fun isLiveStale(maxAgeMillis: Long): Boolean =
+        System.currentTimeMillis() - syncPrefs.getLong("live_synced_at", 0L) > maxAgeMillis
+
     fun isSeriesStale(maxAgeMillis: Long): Boolean =
         isSeriesEmpty() || System.currentTimeMillis() - syncPrefs.getLong("series_synced_at", 0L) > maxAgeMillis
 

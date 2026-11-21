@@ -4,13 +4,19 @@ import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import kotlin.coroutines.cancellation.CancellationException
 import com.kdresdell.iptvtv.theme.IptvTvTheme
 import kotlinx.coroutines.Dispatchers
@@ -154,6 +160,8 @@ private const val UPDATE_RETRY_INTERVAL_MILLIS = 30 * 60 * 1000L
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLog.init(applicationContext)
+        WatchHistory.init(applicationContext)
         setContent {
           IptvTvTheme {
             val context = LocalContext.current
@@ -303,14 +311,16 @@ class MainActivity : ComponentActivity() {
                         channel.streamId to channelDb.getCachedEpgWindow(channel.streamId)
                     }
                 }
-                epgWindows = loadCache()
+                // Reload whenever any download finishes - this one's, the
+                // player's (see EpgSync.updates) or "Refresh list now".
+                launch { epgSync.updates.collect { epgWindows = loadCache() } }
                 // Let the first screen (and a default channel's video) come
                 // up before any background download starts competing for
                 // CPU and network.
                 delay(3_000L)
                 while (true) {
                     val retryDelay = try {
-                        if (epgSync.refreshIfStale(favorites)) epgWindows = loadCache()
+                        epgSync.refreshIfStale(favorites)
                         EPG_CHECK_INTERVAL_MILLIS
                     } catch (e: CancellationException) {
                         throw e
@@ -328,6 +338,12 @@ class MainActivity : ComponentActivity() {
             // whether anything is older than a day. The screen itself only
             // reads what this has already stored.
             var whatsNewVersion by remember { mutableStateOf(0) }
+            // Settings' "Last updated" line - refreshed after the automatic
+            // refresh too, not only after "Refresh list now".
+            var lastListRefreshMillis by remember { mutableStateOf(channelDb.lastCatalogSyncMillis()) }
+            // True while the automatic refresh downloads the provider lists:
+            // shows AutoRefreshNotice in the corner.
+            var autoRefreshing by remember { mutableStateOf(false) }
             val catalogRefresher = remember(credentials) { CatalogRefresher(XtreamApi(credentials), channelDb) }
             LaunchedEffect(catalogRefresher) {
                 if (!credentials.isComplete) return@LaunchedEffect
@@ -342,14 +358,26 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     AppLog.log("What's Hot download failed: ${e.javaClass.simpleName}: ${e.message}")
                 }
-                delay(60_000L)
+                // Short wait so the first channel starts playing before the
+                // big downloads begin (was 60 s, which on a box that closes
+                // background apps meant the refresh often never ran).
+                delay(10_000L)
                 while (true) {
                     try {
+                        autoRefreshing = catalogRefresher.isCatalogStale()
+                        if (autoRefreshing) AppLog.log("Automatic list refresh started")
+                        val startedAt = System.currentTimeMillis()
                         if (catalogRefresher.refreshIfStale()) whatsNewVersion++
+                        if (autoRefreshing) {
+                            AppLog.log("Automatic list refresh finished in ${(System.currentTimeMillis() - startedAt) / 1000} s")
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         AppLog.log("Daily refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                    } finally {
+                        autoRefreshing = false
+                        lastListRefreshMillis = channelDb.lastCatalogSyncMillis()
                     }
                     delay(60L * 60 * 1000)
                 }
@@ -358,16 +386,19 @@ class MainActivity : ComponentActivity() {
             // Settings' "Refresh list now". Launched on the activity-wide
             // scope, not the Settings screen's, so leaving Settings mid-way
             // doesn't cancel the download.
-            var lastListRefreshMillis by remember { mutableStateOf(channelDb.lastCatalogSyncMillis()) }
             var listRefreshStep by remember { mutableStateOf<ListRefreshProgress?>(null) }
             var listRefreshError by remember { mutableStateOf<String?>(null) }
             val onRefreshList: () -> Unit = {
                 if (listRefreshStep == null) {
                     listRefreshError = null
-                    listRefreshStep = ListRefreshProgress(0, 4, "Connecting to your provider...")
+                    listRefreshStep = ListRefreshProgress(0, 5, "Connecting to your provider...")
                     coroutineScope.launch {
                         try {
                             catalogRefresher.refreshAll { progress -> listRefreshStep = progress }
+                            // The guide too - it used not to be part of this,
+                            // so a manual refresh never fixed an empty guide.
+                            listRefreshStep = ListRefreshProgress(5, 5, "Downloading the TV guide...")
+                            epgSync.refreshIfStale(favorites, force = true)
                             whatsNewVersion++
                         } catch (e: CancellationException) {
                             throw e
@@ -407,6 +438,7 @@ class MainActivity : ComponentActivity() {
             // The automatic launch/daily refreshes also update the status.
             LaunchedEffect(whatsNewVersion) { whatsStatus = channelDb.whatsStatus() }
 
+            Box(modifier = Modifier.fillMaxSize()) {
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -726,7 +758,8 @@ class MainActivity : ComponentActivity() {
                                     PlayableItem.Episode(
                                         episode = episode,
                                         seriesName = currentScreen.series.name,
-                                        cover = currentScreen.series.cover
+                                        cover = currentScreen.series.cover,
+                                        playlist = (episodesState as? LoadState.Success)?.data?.episodes.orEmpty()
                                     ),
                                     returnTo = currentScreen
                                 )
@@ -761,6 +794,20 @@ class MainActivity : ComponentActivity() {
                     // screen or shrunk into the guide's top-left slot, so
                     // switching is a resize, not a screen swap.
                     val reduced = currentScreen.viewMode == PlayerViewMode.ReducedWithGuide && item is PlayableItem.Live
+                    // Movies and episodes remember where you are (WatchHistory).
+                    val watchKey: Pair<String, Int>? = when (item) {
+                        is PlayableItem.Vod -> WatchHistory.MOVIE to item.movie.streamId
+                        is PlayableItem.Episode -> WatchHistory.EPISODE to item.episode.episodeId
+                        else -> null
+                    }
+                    val resumeAt = remember(item) {
+                        watchKey?.let { (kind, id) -> WatchHistory.resumePositionMs(kind, id) } ?: 0L
+                    }
+                    // The episode after this one in the series, if any.
+                    val nextEpisode = (item as? PlayableItem.Episode)?.let { ep ->
+                        val index = ep.playlist.indexOfFirst { it.episodeId == ep.episode.episodeId }
+                        if (index >= 0) ep.playlist.getOrNull(index + 1) else null
+                    }
                     PlayerScreen(
                         title = params.title,
                         iconUrl = params.iconUrl,
@@ -797,6 +844,22 @@ class MainActivity : ComponentActivity() {
                         reduced = reduced,
                         guideRecording = if (params.isLive) guideRecording else null,
                         onExitApp = onExitApp,
+                        resumePositionMs = resumeAt,
+                        onProgress = { position, duration ->
+                            watchKey?.let { (kind, id) -> WatchHistory.save(kind, id, position, duration) }
+                        },
+                        onEnded = {
+                            watchKey?.let { (kind, id) -> WatchHistory.markWatched(kind, id, 0L) }
+                        },
+                        nextUpLabel = nextEpisode?.let { next ->
+                            "S${next.season} E${next.episodeNum}" + if (next.title.isNotBlank()) " · ${TitleFormat.clean(next.title)}" else ""
+                        },
+                        onPlayNext = {
+                            val ep = item as? PlayableItem.Episode
+                            if (ep != null && nextEpisode != null) {
+                                screen = Screen.NowPlaying(ep.copy(episode = nextEpisode), returnTo = currentScreen.returnTo)
+                            }
+                        },
                         guideContent = {
                             if (item is PlayableItem.Live) {
                                 FavoritesScreen(
@@ -832,6 +895,12 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 }
+            }
+            // Only for the automatic refresh; "Refresh list now" has its
+            // own progress card in Settings.
+            if (autoRefreshing && listRefreshStep == null) {
+                AutoRefreshNotice(modifier = Modifier.align(Alignment.TopEnd).padding(24.dp))
+            }
             }
           }
         }
