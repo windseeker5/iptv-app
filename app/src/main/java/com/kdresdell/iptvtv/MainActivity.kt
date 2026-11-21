@@ -15,6 +15,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlin.coroutines.cancellation.CancellationException
@@ -438,7 +443,21 @@ class MainActivity : ComponentActivity() {
             // The automatic launch/daily refreshes also update the status.
             LaunchedEffect(whatsNewVersion) { whatsStatus = channelDb.whatsStatus() }
 
-            Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // After the live reconnect gave up, OK tries again - from
+                    // any screen, before that screen's own OK handling.
+                    .onPreviewKeyEvent { event ->
+                        val isOk = event.key == Key.DirectionCenter || event.key == Key.Enter
+                        if (isOk && livePlaybackHolder.connection == LiveConnection.GaveUp) {
+                            if (event.type == KeyEventType.KeyUp) livePlaybackHolder.retryNow()
+                            true
+                        } else {
+                            false
+                        }
+                    }
+            ) {
             when (val currentScreen = screen) {
                 is Screen.Settings -> {
                     if (!credentials.isComplete) {
@@ -898,8 +917,16 @@ class MainActivity : ComponentActivity() {
             }
             // Only for the automatic refresh; "Refresh list now" has its
             // own progress card in Settings.
-            if (autoRefreshing && listRefreshStep == null) {
-                AutoRefreshNotice(modifier = Modifier.align(Alignment.TopEnd).padding(24.dp))
+            androidx.compose.foundation.layout.Column(
+                modifier = Modifier.align(Alignment.TopEnd).padding(24.dp),
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                // Live channel dropped: reconnecting / gave up (LivePlaybackHolder).
+                ConnectionNotice(livePlaybackHolder.connection)
+                if (autoRefreshing && listRefreshStep == null) {
+                    AutoRefreshNotice()
+                }
             }
             }
           }
