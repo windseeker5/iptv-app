@@ -12,16 +12,21 @@ private const val MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
 
 // The daily background job behind What's Hot / What's New: downloads the
 // lists the KD server builds every night (WhatsLists) and matches them to
-// this catalog, keeps the provider's movie and series lists fresh (they used
-// to be downloaded once and never updated) and downloads the IMDb scores. Runs on a
-// low-priority background thread so it never competes with video playback,
-// and every step fails on its own - a provider or server hiccup just means
+// this catalog, keeps the provider's live channel, movie and series lists
+// fresh (they used to be downloaded once and never updated) and downloads
+// the IMDb scores. Runs on a low-priority background thread so it never
+// competes with video playback, and every step fails on its own - a provider or server hiccup just means
 // "try again later", never a broken screen.
 class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDatabase) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+
+    // True when one of the provider lists (the slow downloads) is due, so
+    // the launch refresh can show its "Updating your lists" notice.
+    fun isCatalogStale(): Boolean =
+        db.isLiveStale(MAX_AGE_MILLIS) || db.isVodStale(MAX_AGE_MILLIS) || db.isSeriesStale(MAX_AGE_MILLIS)
 
     // Returns true when anything new was stored.
     suspend fun refreshIfStale(): Boolean = withContext(Dispatchers.IO) {
@@ -31,6 +36,11 @@ class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDa
             // a slow box that gets interrupted has fresh lists.
             var changed = refreshWhatsIfStale()
             var catalogChanged = false
+            // Live channels too since 0.20 - before, only Settings' "Refresh
+            // list now" ever updated them.
+            if (db.isLiveStale(MAX_AGE_MILLIS)) {
+                catalogChanged = step("live channels") { api.syncAllLiveChannelsInto(db) } || catalogChanged
+            }
             if (db.isVodStale(MAX_AGE_MILLIS)) {
                 catalogChanged = step("movies") { api.syncAllVodStreamsInto(db) } || catalogChanged
             }
@@ -86,7 +96,8 @@ class CatalogRefresher(private val api: XtreamApi, private val db: LiveChannelDa
     // ListRefreshProgressCard). Unlike the daily job, a provider failure is
     // thrown so the screen can show it; the IMDb scores stay best-effort.
     suspend fun refreshAll(onProgress: (ListRefreshProgress) -> Unit) = withContext(Dispatchers.IO) {
-        val total = 4
+        // Step 5, the TV guide, is EpgSync's - MainActivity runs it after this.
+        val total = 5
         fun report(step: Int, label: String, noun: String) = { count: Int ->
             onProgress(ListRefreshProgress(step, total, label, count, noun))
         }

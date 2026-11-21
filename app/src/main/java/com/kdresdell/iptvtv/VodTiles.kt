@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -64,10 +65,13 @@ fun PosterCard(
     isSaved: Boolean,
     onOpen: () -> Unit,
     onToggleSaved: () -> Unit,
-    cardModifier: Modifier = Modifier
+    cardModifier: Modifier = Modifier,
+    // Movies only: shows ✓ when finished, a progress bar when part-way.
+    movieId: Int? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(8.dp)
+    val watch = movieId?.let { WatchHistory.get(WatchHistory.MOVIE, it) }
 
     Card(
         onClick = onOpen,
@@ -79,12 +83,22 @@ fun PosterCard(
         border = appCardBorder(shape = shape),
         glow = appCardGlow()
     ) {
-        AsyncImage(
-            model = cover,
-            contentDescription = title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            AsyncImage(
+                model = cover,
+                contentDescription = title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            if (watch?.watched == true) {
+                WatchedBadge(modifier = Modifier.align(Alignment.TopEnd).padding(6.dp))
+            } else if (watch != null && watch.fraction > 0.01f) {
+                WatchProgressBar(
+                    watch.fraction,
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp)
+                )
+            }
+        }
     }
 
     RowActionsMenu(
@@ -170,6 +184,12 @@ fun VodRow(
                     Text(text = "★", color = Color(0xFFA6F2A6))
                 }
                 Text(text = TitleFormat.clean(movie.name), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                val watch = WatchHistory.get(WatchHistory.MOVIE, movie.streamId)
+                if (watch?.watched == true) {
+                    Text(text = "✓ Watched", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                } else if (watch != null && watch.fraction > 0.01f) {
+                    WatchProgressBar(watch.fraction, modifier = Modifier.width(60.dp))
+                }
             }
             typeBadge?.invoke()
         }
@@ -277,4 +297,36 @@ fun RecordingRow(
         onDismiss = { menuExpanded = false },
         actions = listOf(MenuAction("Remove from Recordings", onDelete, isDestructive = true))
     )
+}
+
+// Thin bar showing how far into a movie/episode you got (WatchHistory).
+@Composable
+fun WatchProgressBar(fraction: Float, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(Color.White.copy(alpha = 0.25f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .height(4.dp)
+                .background(MaterialTheme.colorScheme.primary)
+        )
+    }
+}
+
+// ✓ in a small circle: a movie you finished (WatchHistory).
+@Composable
+fun WatchedBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(26.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text = "✓", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelLarge)
+    }
 }

@@ -11,6 +11,13 @@ import java.io.File
 sealed class PlayableItem {
     data class Live(val channel: LiveChannel) : PlayableItem()
     data class Vod(val movie: VodStream) : PlayableItem()
-    data class Episode(val episode: SeriesEpisode, val seriesName: String, val cover: String) : PlayableItem()
+    // playlist: the whole series' episodes in order, so the player knows
+    // which one comes next (auto-play, see PlayerScreen's nextUpLabel).
+    data class Episode(
+        val episode: SeriesEpisode,
+        val seriesName: String,
+        val cover: String,
+        val playlist: List<SeriesEpisode> = emptyList()
+    ) : PlayableItem()
     data class Recording(val file: File) : PlayableItem()
 }

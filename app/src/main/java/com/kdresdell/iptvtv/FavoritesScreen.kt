@@ -571,6 +571,8 @@ fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
             playWhenReady = true
         }
     }
+    // It plays with sound, so no screensaver on top of it either.
+    KeepScreenAwakeWhilePlaying(exoPlayer)
     // Keeps 4:3 channels from being stretched to fill the 16:9 box.
     var aspect by remember(exoPlayer) { mutableStateOf(16f / 9f) }
     DisposableEffect(exoPlayer) {

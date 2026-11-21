@@ -1,11 +1,9 @@
 package com.kdresdell.iptvtv
 
-import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
@@ -23,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -134,7 +133,18 @@ fun PlayerScreen(
     // recording of this channel (see GuideRecordingBridge).
     guideRecording: GuideRecordingBridge? = null,
     // Back while the menu is open, live only - exits the whole app.
-    onExitApp: () -> Unit = {}
+    onExitApp: () -> Unit = {},
+    // Movies/episodes (see WatchHistory): where to start, a callback that
+    // saves where you are (every few seconds, on pause and on leaving), and
+    // one for reaching the very end.
+    resumePositionMs: Long = 0L,
+    onProgress: (positionMs: Long, durationMs: Long) -> Unit = { _, _ -> },
+    onEnded: () -> Unit = {},
+    // Episodes only: the next episode's label ("S1 E4 · Title"). When set,
+    // reaching the end shows a 10 s "Next episode" countdown that then
+    // calls onPlayNext (Back cancels, OK plays it right away).
+    nextUpLabel: String? = null,
+    onPlayNext: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // Recording is opt-in (see RecordingPrefs/SettingsScreen) - off by
@@ -154,6 +164,8 @@ fun PlayerScreen(
     // just stayed black forever with the paused icon frozen on top, giving
     // no sign of whether the app, the content, or the network was at fault.
     var playbackError by remember(contentId) { mutableStateOf<String?>(null) }
+    // Set when a movie/episode plays to the very end (see onEnded).
+    var ended by remember(contentId) { mutableStateOf(false) }
     // key() (not a plain if/else around remember/DisposableEffect) so that
     // if isLive/livePlaybackHolder ever differ between two calls at this
     // same composable slot (e.g. switching straight from a live channel to
@@ -183,9 +195,15 @@ fun PlayerScreen(
                     // Last chosen audio/subtitle language (see TrackChoices.kt).
                     applyTrackPrefs(TrackPrefs(context))
                     setMediaItem(MediaItem.fromUri(streamUrl))
+                    // Pick up where you left off (see WatchHistory).
+                    if (resumePositionMs > 0) seekTo(resumePositionMs)
                     addListener(object : Player.Listener {
                         override fun onPlayerError(error: PlaybackException) {
                             playbackError = error.message ?: "Playback error"
+                        }
+
+                        override fun onPlaybackStateChanged(playbackState: Int) {
+                            if (playbackState == Player.STATE_ENDED) ended = true
                         }
                     })
                     prepare()
@@ -205,11 +223,33 @@ fun PlayerScreen(
     // Pause when the app leaves the screen, and on return resume - live
     // streams jump back to the live edge rather than continuing stale.
     val resumeAfterStop = remember { booleanArrayOf(false) }
+    // Movies/episodes: hands the current spot to onProgress (WatchHistory).
+    val currentOnProgress = androidx.compose.runtime.rememberUpdatedState(onProgress)
+    fun saveProgress() {
+        if (isLive) return
+        val duration = exoPlayer.duration
+        if (duration == C.TIME_UNSET || duration <= 0) return
+        currentOnProgress.value(exoPlayer.currentPosition, duration)
+    }
+    // Every 10 s while playing, and once more on leaving the title. Declared
+    // after the player, so it runs before the player is released.
+    if (!isLive) {
+        LaunchedEffect(exoPlayer, contentId) {
+            while (true) {
+                delay(10_000L)
+                if (exoPlayer.isPlaying) saveProgress()
+            }
+        }
+        DisposableEffect(exoPlayer, contentId) {
+            onDispose { if (!ended) saveProgress() }
+        }
+    }
     DisposableEffect(exoPlayer, isLive) {
         val lifecycle = (context as? androidx.activity.ComponentActivity)?.lifecycle
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             when (event) {
                 androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    saveProgress()
                     resumeAfterStop[0] = exoPlayer.playWhenReady
                     exoPlayer.playWhenReady = false
                 }
@@ -224,17 +264,6 @@ fun PlayerScreen(
         }
         lifecycle?.addObserver(observer)
         onDispose { lifecycle?.removeObserver(observer) }
-    }
-
-    // Google TV's screensaver/sleep timer has no idea video is playing here
-    // (there's no user input during playback) - without this it kicks in a
-    // few minutes into any live channel or VOD, same as if the TV sat idle.
-    DisposableEffect(Unit) {
-        val window = (context as? Activity)?.window
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
     }
 
     var showInfo by remember(contentId) { mutableStateOf(true) }
@@ -254,7 +283,8 @@ fun PlayerScreen(
     // shares one player across channels, see LivePlaybackHolder). Opened
     // with Up, which VOD doesn't otherwise use; OK keeps meaning play/pause.
     val trackChoices = rememberTrackChoices(exoPlayer)
-    MatchDisplayFrameRate(exoPlayer, enabled = !isLive)
+    MatchDisplayFrameRate(exoPlayer, contentId, isLive, active = !reduced)
+    WatchPlaybackHealth(exoPlayer, contentId, isLive, title)
     val trackPrefs = remember { TrackPrefs(context) }
     var showTrackMenu by remember(contentId) { mutableStateOf(false) }
 
@@ -266,6 +296,9 @@ fun PlayerScreen(
     // hand with longPressJob/longPressFired.
     val liveRecorder = remember { LiveRecorder() }
     var isRecording by remember(contentId) { mutableStateOf(false) }
+    // No screensaver while playing - or recording, whose lockout screen
+    // replaces the video (see KeepScreenAwake.kt).
+    KeepScreenAwakeWhilePlaying(exoPlayer, alsoWhen = isRecording)
     var recordingElapsedSeconds by remember(contentId) { mutableStateOf(0) }
     // Surfaced live in the REC indicator below - if the account only
     // supports one stream, live playback freezes once recording starts,
@@ -458,6 +491,32 @@ fun PlayerScreen(
     // (falls back to exoPlayer.currentPosition) once the feedback overlay
     // hides.
     var seekTargetMs by remember(contentId) { mutableStateOf<Long?>(null) }
+    // Seconds left before the next episode starts, or null when no
+    // countdown is showing.
+    var nextCountdown by remember(contentId) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(ended) {
+        if (!ended) return@LaunchedEffect
+        onEnded()
+        if (nextUpLabel == null) return@LaunchedEffect
+        nextCountdown = 10
+        while ((nextCountdown ?: 0) > 0) {
+            delay(1_000L)
+            nextCountdown = nextCountdown?.minus(1) ?: return@LaunchedEffect
+        }
+        if (nextCountdown == 0) {
+            nextCountdown = null
+            onPlayNext()
+        }
+    }
+    // Paused movie/episode: "32 min left · ends at 9:47". The clock keeps
+    // moving while paused, so the end time is recomputed every 20 s.
+    var pausedNowMs by remember(contentId) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(isPlaying, contentId) {
+        while (!isPlaying) {
+            pausedNowMs = System.currentTimeMillis()
+            delay(20_000L)
+        }
+    }
     var seekDeltaMs by remember(contentId) { mutableStateOf(0L) }
     var seekDurationMs by remember(contentId) { mutableStateOf(0L) }
     var seekFeedbackAtMs by remember(contentId) { mutableStateOf<Long?>(null) }
@@ -629,6 +688,19 @@ fun PlayerScreen(
                 false
             }
             .onKeyEvent { event ->
+                // "Next episode" countdown on screen: OK plays it now, Back
+                // cancels it and stays on the finished episode.
+                if (nextCountdown != null) {
+                    if (event.key == Key.Back && event.type == KeyEventType.KeyDown) {
+                        nextCountdown = null
+                        return@onKeyEvent true
+                    }
+                    if ((event.key == Key.DirectionCenter || event.key == Key.Enter) && event.type == KeyEventType.KeyUp) {
+                        nextCountdown = null
+                        onPlayNext()
+                        return@onKeyEvent true
+                    }
+                }
                 // Back while the rail is open exits the app (below); Right
                 // closes it - a quick "return to the stream" gesture
                 // (matches the old Left-opens/Right-closes muscle memory) -
@@ -690,6 +762,7 @@ fun PlayerScreen(
                         } else {
                             isPlaying = !isPlaying
                             exoPlayer.playWhenReady = isPlaying
+                            if (!isPlaying) saveProgress()
                         }
                     }
                     return@onKeyEvent true
@@ -888,6 +961,56 @@ fun PlayerScreen(
                         tint = Color.Black,
                         // 30% smaller per direction (was 52dp).
                         modifier = Modifier.size(36.dp)
+                    )
+                }
+
+                if (!isPlaying && !isLive) {
+                    val duration = exoPlayer.duration
+                    if (duration != C.TIME_UNSET && duration > 0) {
+                        val leftMs = (duration - exoPlayer.currentPosition).coerceAtLeast(0L)
+                        Text(
+                            text = "${formatRemaining(leftMs)} left · ends at ${formatClock(pausedNowMs + leftMs)}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .padding(top = 140.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = 0.6f))
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            val countdown = nextCountdown
+            if (countdown != null && nextUpLabel != null && !reduced) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(32.dp)
+                        .widthIn(max = 420.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f))
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Next episode in $countdown s",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = nextUpLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "OK to play now · Back to cancel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -1368,6 +1491,19 @@ private fun formatTime(epochSeconds: Long): String =
 
 private fun formatNowDateTime(epochSeconds: Long): String =
     SimpleDateFormat("EEE, MMM d · HH:mm", Locale.getDefault()).format(Date(epochSeconds * 1000))
+
+// "1 h 05 min" / "32 min" / "45 s" - time left in a paused movie/episode.
+private fun formatRemaining(ms: Long): String {
+    val totalMin = ms / 60_000
+    return when {
+        totalMin >= 60 -> "%d h %02d min".format(totalMin / 60, totalMin % 60)
+        totalMin >= 1 -> "$totalMin min"
+        else -> "${ms / 1000} s"
+    }
+}
+
+private fun formatClock(epochMs: Long): String =
+    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(Date(epochMs))
 
 private fun formatElapsed(totalSeconds: Long): String {
     val h = totalSeconds / 3600

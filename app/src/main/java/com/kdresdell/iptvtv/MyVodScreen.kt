@@ -97,6 +97,7 @@ fun MyVodScreen(
                                 isSaved = true,
                                 onOpen = { onPlayMovie(movie) },
                                 onToggleSaved = { onRemoveMovie(movie) },
+                                movieId = movie.streamId,
                                 cardModifier = if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier
                             )
                         }
