@@ -38,8 +38,19 @@ private const val STALL_TIMEOUT_MS = 20_000L
 // kept playing after "exiting" the app: the old code tied release() to
 // Compose disposing the player composable, which never happened if the OS
 // only backgrounded the Activity instead of destroying it.
+//
+// 0.23: the ExoPlayer itself is only alive while live TV is on screen.
+// stop() (leaving live for a show, Search, Settings...) releases it, and the
+// next read of `player` builds a fresh one - one player at a time, so a weak
+// Fire TV never carries an idle live player while a movie plays.
 class LivePlaybackHolder(context: Context) {
-    val player: ExoPlayer = ExoPlayer.Builder(context.applicationContext).build()
+    private val appContext = context.applicationContext
+    private var current: ExoPlayer? = null
+    val player: ExoPlayer
+        get() = current ?: AppMemory.buildPlayer(appContext).also {
+            it.addListener(listener)
+            current = it
+        }
 
     // Automatic reconnect (2026-11-21): a Wi-Fi reboot used to leave the
     // channel dead until someone zapped away and back. Now a dropped stream
@@ -75,24 +86,25 @@ class LivePlaybackHolder(context: Context) {
     // not read anywhere while the embedded guide view is current.
     var onError: ((String) -> Unit)? = null
 
-    init {
-        player.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                onError?.invoke(error.message ?: "Playback error")
-                onStreamLost(error.message ?: "playback error")
-            }
+    private val listener = object : Player.Listener {
+        override fun onPlayerError(error: PlaybackException) {
+            onError?.invoke(error.message ?: "Playback error")
+            onStreamLost(error.message ?: "playback error")
+        }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                handler.removeCallbacks(stallRunnable)
-                when (playbackState) {
-                    Player.STATE_READY -> onStreamBack()
-                    Player.STATE_BUFFERING -> if (currentStreamId != null) {
-                        handler.postDelayed(stallRunnable, STALL_TIMEOUT_MS)
-                    }
-                    else -> {}
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            handler.removeCallbacks(stallRunnable)
+            when (playbackState) {
+                Player.STATE_READY -> onStreamBack()
+                Player.STATE_BUFFERING -> if (currentStreamId != null) {
+                    handler.postDelayed(stallRunnable, STALL_TIMEOUT_MS)
                 }
+                else -> {}
             }
-        })
+        }
+    }
+
+    init {
         try {
             connectivity?.registerDefaultNetworkCallback(networkCallback)
         } catch (e: Exception) {
@@ -117,7 +129,7 @@ class LivePlaybackHolder(context: Context) {
             AppLog.log("Live channel still unreachable after ${GIVE_UP_AFTER_MS / 60000} min - stopped retrying")
             connection = LiveConnection.GaveUp
             handler.removeCallbacks(retryRunnable)
-            player.stop()
+            current?.stop()
             return
         }
         val delays = longArrayOf(3_000L, 5_000L, 10_000L, 20_000L)
@@ -149,11 +161,12 @@ class LivePlaybackHolder(context: Context) {
             onStreamLost("timeout")
             return
         }
-        player.stop()
-        player.seekToDefaultPosition()
+        val p = current ?: return
+        p.stop()
+        p.seekToDefaultPosition()
         // playWhenReady is left as it was: a retry while the app is in the
         // background must not start the sound over the launcher.
-        player.prepare()
+        p.prepare()
         // A retry that just hangs without an error still counts as failed.
         handler.removeCallbacks(stallRunnable)
         handler.postDelayed(stallRunnable, STALL_TIMEOUT_MS)
@@ -179,17 +192,17 @@ class LivePlaybackHolder(context: Context) {
 
     private var released = false
 
-    // Stops playback and forgets the current channel, so the next tune() to
-    // the same channel starts fresh instead of being skipped as "already
-    // tuned". Called whenever the live screen goes away (menu -> Search etc.)
-    // - the shared player is no longer tied to a composable's lifecycle, so
-    // without this its audio kept playing on every other screen.
+    // Stops playback, forgets the current channel and frees the player, so
+    // the next tune() starts fresh on a new one. Called whenever the live
+    // screen goes away (menu -> Search, a movie etc.) - the shared player is
+    // no longer tied to a composable's lifecycle, so without this its audio
+    // kept playing on every other screen.
     fun stop() {
         if (released) return
         resetConnection()
         currentStreamId = null
-        player.stop()
-        player.clearMediaItems()
+        current?.release()
+        current = null
     }
 
     fun release() {
@@ -199,6 +212,7 @@ class LivePlaybackHolder(context: Context) {
             connectivity?.unregisterNetworkCallback(networkCallback)
         } catch (e: Exception) {
         }
-        player.release()
+        current?.release()
+        current = null
     }
 }
