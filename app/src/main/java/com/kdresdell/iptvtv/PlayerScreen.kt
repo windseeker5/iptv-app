@@ -191,7 +191,7 @@ fun PlayerScreen(
             livePlaybackHolder.player
         } else {
             val player = remember(streamUrl) {
-                ExoPlayer.Builder(context).build().apply {
+                AppMemory.buildPlayer(context).apply {
                     // Last chosen audio/subtitle language (see TrackChoices.kt).
                     applyTrackPrefs(TrackPrefs(context))
                     setMediaItem(MediaItem.fromUri(streamUrl))

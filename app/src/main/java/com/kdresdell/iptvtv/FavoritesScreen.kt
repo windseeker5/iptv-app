@@ -565,7 +565,7 @@ private fun TopPreviewBlock(
 fun LivePreview(streamUrl: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val exoPlayer = remember(streamUrl) {
-        ExoPlayer.Builder(context).build().apply {
+        AppMemory.buildPlayer(context).apply {
             setLiveStream(streamUrl)
             prepare()
             playWhenReady = true

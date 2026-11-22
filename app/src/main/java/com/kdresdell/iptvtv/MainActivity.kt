@@ -163,9 +163,20 @@ private const val UPDATE_CHECK_INTERVAL_MILLIS = 6 * 60 * 60 * 1000L
 private const val UPDATE_RETRY_INTERVAL_MILLIS = 30 * 60 * 1000L
 
 class MainActivity : ComponentActivity() {
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        AppMemory.onTrimMemory(applicationContext, level)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppLog.init(applicationContext)
+        // Memory diet (see AppMemory.kt): crashes and abnormal closes go to
+        // the Settings log, and pictures/video buffers are kept small.
+        CrashCatcher.install(applicationContext)
+        AppMemory.logLastExit(applicationContext)
+        AppMemory.logDevice(applicationContext)
+        AppMemory.installImageLoader(applicationContext)
         WatchHistory.init(applicationContext)
         setContent {
           IptvTvTheme {
